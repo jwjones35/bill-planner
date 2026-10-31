@@ -268,8 +268,8 @@ function syncCardHtml() {
   return `<h2>Share with another phone</h2><div class="card pad">
     <div><b>Sharing is on</b></div>
     <div class="small ${syncStatus.error ? 'neg' : 'muted'}">${syncStatus.error ? esc(syncStatus.error) : when ? `Last synced ${timeAgo(when)}` : 'Not synced yet'}</div>
-    <div class="btns"><button class="btn" data-act="syncAdd">Add another phone</button></div>
-    <div class="btns"><button class="btn small ghost" data-act="syncNow">Sync now</button><button class="btn small ghost" data-act="syncOff">Stop sharing</button></div></div>`;
+    <div class="btns"><button class="btn" data-act="syncAdd">Add another phone</button><button class="btn ghost" data-act="syncNow">Sync now</button></div>
+    <p class="small" style="margin:22px 0 0;text-align:right"><a href="#" data-act="syncOff" class="muted">Stop sharing…</a></p></div>`;
 }
 function sheetSyncCode(code) {
   openSheet(`<h3>Add another phone</h3>
@@ -292,13 +292,37 @@ function sheetSyncJoin(err) {
     <div class="btns">${cancelBtn}<button class="btn">Join</button></div></form>`);
   setTimeout(() => { const i = document.getElementById('jCode'); if (i) i.focus(); }, 250);
 }
+// Stopping is deliberately hard to do by accident: the word has to be typed before the button works.
 function sheetSyncOff() {
-  openSheet(`<h3>Stop sharing on this phone?</h3>
-    <p>This phone keeps everything it has now, but stops updating with the other phone.</p>
-    <div class="btns"><button class="btn ghost" data-act="close">Keep sharing</button><button class="btn" data-act="syncOffYes">Stop sharing</button></div>
-    <p class="hint" style="margin-top:16px">To end sharing for every phone and delete the online copy:</p>
-    <div class="btns"><button class="btn small danger" data-act="syncOffAll">Stop for all phones and delete the online copy</button></div>`);
+  openSheet(`<h3>Stop sharing?</h3>
+    <form id="fSyncOff" data-word="STOP">
+      <p>This phone keeps everything it has now, but <b>stops updating with the other phone</b>. Changes made on either phone after this won't show on the other. To share again later, you'd link the phones again with a new code.</p>
+      <label for="soWord">To stop sharing on this phone, type <b>STOP</b></label>
+      <input id="soWord" name="word" autocapitalize="characters" autocomplete="off" spellcheck="false" data-act="offWord">
+      <div class="btns"><button type="button" class="btn" data-act="close">Keep sharing</button><button class="btn danger" disabled>Stop sharing</button></div>
+    </form>
+    <details style="margin-top:22px"><summary class="small muted">Stop for every phone and delete the online copy…</summary>
+      <form id="fSyncOffAll" data-word="DELETE">
+        <p class="small">Sharing stops on <b>every</b> phone, and the copy stored online is deleted. Each phone keeps what it has now.</p>
+        <label for="soAll">To do this, type <b>DELETE</b></label>
+        <input id="soAll" name="word" autocapitalize="characters" autocomplete="off" spellcheck="false" data-act="offWord">
+        <div class="btns"><button class="btn danger" disabled>Stop for every phone and delete</button></div>
+      </form></details>`);
 }
+// The Stop buttons only work once the word is typed exactly.
+document.addEventListener('input', e => {
+  const el = e.target;
+  if (el.dataset.act !== 'offWord') return;
+  const f = el.form, btn = f.querySelector('button.danger');
+  if (btn) btn.disabled = el.value.trim().toUpperCase() !== f.dataset.word;
+});
+document.addEventListener('submit', async e => {
+  const f = e.target;
+  if (f.id !== 'fSyncOff' && f.id !== 'fSyncOffAll') return;
+  e.preventDefault(); e.stopImmediatePropagation();
+  if (String(new FormData(f).get('word') || '').trim().toUpperCase() !== f.dataset.word) return;
+  await syncAct(f.id === 'fSyncOff' ? 'syncOffYes' : 'syncOffAll');
+}, true);
 // Button and form handlers (the app's own handlers pass anything they don't know here).
 async function syncAct(act) {
   try {
