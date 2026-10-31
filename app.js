@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's available to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '1.4.2';
+const APP_VERSION = '1.4.3';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -1420,7 +1420,9 @@ document.addEventListener('submit', e => {
       const token = (fd.get('token') || '').trim();
       if (!token) { toast('Paste the setup token from SimpleFIN.'); return; }
       const btn = f.querySelector('button.btn:not(.ghost)'); btn.disabled = true; btn.textContent = 'Connecting...';
-      claimToken(token).then(async access => {
+      // Backup method: an already-claimed SimpleFIN access URL can be pasted instead of a setup token.
+      const direct = /^https:\/\/[^:@\/\s]+:[^@\/\s]+@\S+$/.test(token);
+      (direct ? Promise.resolve(token) : claimToken(token)).then(async access => {
         setBankAccess(access);
         S.bank = { accounts: [], tx: [], ignore: S.bank.ignore || [], suggest: [], autoLog: [] };
         save(); closeSheet();
