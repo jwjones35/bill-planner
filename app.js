@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's available to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '1.8.0';
+const APP_VERSION = '1.9.0';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -828,7 +828,7 @@ function section(title, list, emptyText, collapsed) {
   const tot = sum(list.map(x => x.amt));
   const rows = list.length ? list.map(billRow).join('') : `<div class="empty">${emptyText}</div>`;
   if (collapsed) {
-    return `<details class="card" style="margin-top:22px"><summary class="row"><span class="main"><div class="name">${title}</div><div class="sub">${list.length} bill${list.length === 1 ? '' : 's'}</div></span><span class="amt num">${fm(tot)}</span></summary>${rows}</details>`;
+    return `<details class="card" style="margin-top:10px"><summary class="row"><span class="main"><div class="name">${title}</div><div class="sub">${list.length} bill${list.length === 1 ? '' : 's'}</div></span><span class="amt num">${fm(tot)}</span></summary>${rows}</details>`;
   }
   return `<h2>${title}<span class="tot num">${list.length ? fm(tot) : ''}</span></h2><div class="card">${rows}</div>`;
 }
@@ -858,10 +858,41 @@ function chargeChoices(p) {
 }
 /* Autopay bills after their due date: a warning for ones the bank still doesn't show after 3 business days
    (with "remind me in X days" and "keep waiting"), and a quiet list of ones the app is waiting on. */
-function autopayHtml() {
+/* The one-line answer at the top of Home: green (on track), amber (tight) or red (short, or bills past due).
+   Plain words first; the numbers are underneath for anyone who wants them. */
+function statusHtml(c, nw) {
+  const t = today();
+  const late = pastDue().length + autopayLate().length;
+  const pay = !c.hasPay ? 'payday' : diffDays(t, c.np) <= 6 ? WDL[new Date(parseD(c.np)).getUTCDay()] : nice(c.np);
+  const payWhen = c.hasPay ? `until ${pay}` : 'for now';
+  let level, title, text;
+  if (c.safe < 0) {
+    level = 'bad'; title = `Short ${fm(-c.safe)} before ${c.hasPay ? pay + "'s pay" : 'payday'}`;
+    text = 'The bills due before then add up to more than what is in checking. See what is due below; some may be able to wait a few days.';
+  } else if (late) {
+    level = 'bad'; title = late === 1 ? 'A bill is past due' : `${late} bills are past due`;
+    text = `See ${late === 1 ? 'it' : 'them'} under Needs your attention. After ${late === 1 ? 'that' : 'those'}, there's ${fm(c.safe)} to spend ${payWhen}.`;
+  } else if (c.everyday && c.safe < c.everyday) {
+    level = 'warn'; title = `Tight ${payWhen}`;
+    text = `${fm(c.safe)} to spend, and everyday spending usually comes to about ${fm(c.everyday)} by then. Go easy until the paycheck.`;
+  } else if (nw && nw.available < 0) {
+    level = 'warn'; title = 'Next week looks short';
+    text = `${fm(c.safe)} to spend ${payWhen}, but after next week's bills it would be about ${fm(-nw.available)} short. Keep some back.`;
+  } else if (nw && nw.short > 0) {
+    level = 'warn'; title = 'Keep some back for next week';
+    text = `${fm(c.safe)} to spend ${payWhen}, but keep at least ${fm(nw.short)} of it: next week's pay won't cover next week's bills.`;
+  } else {
+    level = 'good'; title = "You're on track";
+    text = `${fm(c.safe)} to spend ${payWhen}, after the bills due before then.`;
+  }
+  return `<div class="status status-${level}" role="status"><span class="status-dot" aria-hidden="true"></span><div><div class="status-title">${title}</div><div class="status-text">${text}</div></div></div>`;
+}
+// part: 'late' (the warning, under "Needs your attention") or 'waiting' (the quiet list, under "Coming up").
+function autopayHtml(part) {
   const all = autopayDue();
   if (!all.length) return '';
-  const late = all.filter(x => autopayStatus(x) === 'late'), waiting = all.filter(x => autopayStatus(x) !== 'late');
+  const late = part === 'waiting' ? [] : all.filter(x => autopayStatus(x) === 'late');
+  const waiting = part === 'late' ? [] : all.filter(x => autopayStatus(x) !== 'late');
   const bank = bankOn() ? esc(bankName()) : 'the bank';
   let h = '';
   if (late.length) h += `<div class="card alert-bad" style="margin-top:12px">
@@ -949,10 +980,12 @@ function viewHome() {
   }
   const stale = !bal.updated ? 'Balance not entered yet' : diffDays(bal.updated, t) === 0 ? 'Balance updated today' : `Balance updated ${diffDays(bal.updated, t)} day${diffDays(bal.updated, t) === 1 ? '' : 's'} ago`;
   let h = `<h1>Bills</h1>
+  ${statusHtml(c, nw)}
   <div class="card hero">
     <div class="label">Available to spend ${c.hasPay ? `until payday, ${nice(c.np)}` : 'for the next 2 weeks'}</div>
     <div class="big num ${c.safe < 0 ? 'neg' : ''}">${fm(c.safe)}</div>
-    <div class="small muted">Checking minus the bills due before payday.${nw ? ' Next week is estimated below.' : ' Bills after payday are not included, so keep some back for next week.'}</div>
+    <details><summary>How this is worked out</summary>
+    <div class="small muted" style="margin-top:6px">Checking minus the bills due before payday.${nw ? '' : ' Bills after payday are not included, so keep some back for next week.'}</div>
     ${bankOn()
       ? (manualBal()
         ? `<div class="small muted" style="margin-top:4px">Using the balance you entered from your bank's app (${whenText(manualBal().at)}) until the bank connection has newer data · <a href="#" data-act="balances">Change</a></div>`
@@ -961,7 +994,6 @@ function viewHome() {
         + (S.bank.error ? `<div class="small neg" style="margin-top:4px">${esc(S.bank.error)}</div>` : '')
       : `<div class="small muted" style="margin-top:4px">${stale} · <a href="#" data-act="balances">Update</a></div>`}
     ${c.everyday ? `<div class="small muted" style="margin-top:4px">Usual everyday spending until then: about ${fm(c.everyday)} <span class="tag">not subtracted</span></div>` : ''}
-    <details><summary>How this is worked out</summary>
       <div class="breakdown num">
         ${bankOn() ? `<div><span>${manualBal() ? "Checking (entered from your bank's app)" : `Checking at ${esc(bankName())}`}</span><span>${fm(manualBal() ? manualBal().amount : S.bank.bal.checking)}</span></div>
         ${Math.abs(checkingNow() - (manualBal() ? manualBal().amount : S.bank.bal.checking)) > 0.004 ? `<div><span>Paid in the app, not showing at the bank yet</span><span>−${fm((manualBal() ? manualBal().amount : S.bank.bal.checking) - checkingNow())}</span></div>` : ''}`
@@ -971,47 +1003,58 @@ function viewHome() {
         <div class="sum"><span>Available to spend</span><span>${fm(c.safe)}</span></div>
         ${savingsNow() ? `<div class="muted"><span>Savings (not counted)</span><span>${fm(savingsNow())}</span></div>` : ''}
       </div></details>
+    </details>
     ${nw ? `<div class="nextweek">
-      <div class="nw-label">Estimated available to spend next week, ${nice(nw.p1)} to ${nice(addDays(nw.p2, -1))}</div>
+      <div class="nw-label">Next week, ${nice(nw.p1)} to ${nice(addDays(nw.p2, -1))}</div>
       <div class="nw-amt num ${nw.available < 0 ? 'neg' : ''}">${nw.est ? '<span class="small muted" style="font-weight:400">about</span> ' : ''}${fm(nw.available)}</div>
-      <div class="small muted">Today's ${fm(c.safe)} + about ${fm(nw.income)} pay on ${nice(nw.p1)} − ${fm(nw.billsTotal)} in bills due before ${nice(nw.p2)}${nw.keep > 0 ? ` − ${fm(nw.keep)} kept for bills due ${nice(nw.keepFrom)} to ${nice(addDays(nw.keepTo, -1))} that the pay coming then won't cover` : ''}. If nothing else is spent before payday. Recording spending lowers both numbers.</div>
+      <details><summary>How next week is worked out</summary>
+      <div class="small muted" style="margin-top:6px">Today's ${fm(c.safe)} + about ${fm(nw.income)} pay on ${nice(nw.p1)} − ${fm(nw.billsTotal)} in bills due before ${nice(nw.p2)}${nw.keep > 0 ? ` − ${fm(nw.keep)} kept for bills due ${nice(nw.keepFrom)} to ${nice(addDays(nw.keepTo, -1))} that the pay coming then won't cover` : ''}. If nothing else is spent before payday. Recording spending lowers both numbers.</div></details>
       ${nw.short > 0 ? `<div class="nw-warn">Next week's pay is ${fm(nw.short)} less than next week's bills, so keep at least <b>${fm(nw.short)}</b> of today's money for them.</div>` : ''}
     </div>` : ''}
-  </div>
-  ${pastDueHtml()}
-  ${autopayHtml()}
-  ${notClearedHtml()}
-  ${sugHtml}
-  <div class="btns" style="margin-top:10px"><button class="btn" data-act="spend">+ Record spending (groceries, gas, other purchases)</button></div>`;
+  </div>`;
 
-  // Paychecks that should have arrived but weren't confirmed
+  // 1. Needs your attention: only things that need a decision or action. Nothing here = nothing to do.
+  let att = pastDueHtml() + autopayHtml('late') + notClearedHtml() + sugHtml;
   const missed = payList(addDays(t, -10) > S.setupDate ? addDays(t, -10) : S.setupDate, t);
-  if (missed.length) h += `<div class="banner warn">Did ${missed.length === 1 ? 'this paycheck' : 'these paychecks'} arrive? ${missed.map(p => `<b>${esc(p.inc.name)}</b> (${nice(p.d)})`).join(', ')}. <a href="#" data-act="tab" data-tab="pay">Confirm on Paydays</a></div>`;
-  const todayPay = payList(t, addDays(t, 1));
-  if (todayPay.length) h += `<div class="banner good">Payday today: ${todayPay.map(p => esc(p.inc.name)).join(', ')}. <a href="#" data-act="tab" data-tab="pay">Confirm the amounts</a> when they land.</div>`;
-  if (c.unknown.length) h += `<div class="banner warn">${c.unknown.map(x => `<b>${esc(x.b.name)}</b>`).join(', ')} ${c.unknown.length === 1 ? 'has' : 'have'} no amount yet, so ${c.unknown.length === 1 ? "it isn't" : "they aren't"} counted. Tap the bill to add one.</div>`;
-  if (S.suggestSavings && c.hasPay && !(bankOn() && S.bank.suggest.length)) {
-    // Only suggest saving if the cushion stays above the buffer for the next few paydays too,
-    // without counting paychecks that haven't been confirmed yet.
-    const lowest = Math.min(c.safe - c.everyday, ...periods(4, false).out.map(p => p.run));
-    const extra = Math.floor((lowest - (S.savingsBuffer || 0)) / 25) * 25;
-    if (extra >= 25) h += `<div class="banner good">You could move <b>${fm(extra)}</b> to savings and still keep at least a ${fm(S.savingsBuffer)} cushion over the next few paydays.</div>`;
-  }
-
+  if (missed.length) att += `<div class="banner warn">Did ${missed.length === 1 ? 'this paycheck' : 'these paychecks'} arrive? ${missed.map(p => `<b>${esc(p.inc.name)}</b> (${nice(p.d)})`).join(', ')}. <a href="#" data-act="tab" data-tab="pay">Confirm on Paydays</a></div>`;
+  if (c.unknown.length) att += `<div class="banner warn">${c.unknown.map(x => `<b>${esc(x.b.name)}</b>`).join(', ')} ${c.unknown.length === 1 ? 'has' : 'have'} no amount yet, so ${c.unknown.length === 1 ? "it isn't" : "they aren't"} counted. Tap the bill to add one.</div>`;
   for (const a of (S.bank.feeAlerts || []).filter(a => !a.seen)) {
     const b = findB(a.billId);
     if (!b) continue;
-    h += `<div class="banner bad"><b>Higher fee than usual:</b> ${esc(b.name)} charged a ${fm(a.fee)} transaction fee on ${nice(a.date)}. The usual fee is ${fm(a.usual)}. You may want to contact them about it.
+    att += `<div class="banner bad"><b>Higher fee than usual:</b> ${esc(b.name)} charged a ${fm(a.fee)} transaction fee on ${nice(a.date)}. The usual fee is ${fm(a.usual)}. You may want to contact them about it.
       <div class="btns" style="margin-top:8px"><button class="btn small ghost" data-act="feeSeen" data-bill="${a.billId}" data-date="${a.date}">Got it</button></div></div>`;
   }
   for (const a of (S.bank.priceAlerts || []).filter(a => !a.seen)) {
     const b = findB(a.billId);
     if (!b) continue;
-    h += `<div class="banner warn"><b>Price change:</b> ${esc(b.name)} charged ${fm(a.now)} on ${nice(a.date)}, ${a.now > a.was ? 'up' : 'down'} from ${fm(a.was)}. The bill's amount is now ${fm(a.now)}.
+    att += `<div class="banner warn"><b>Price change:</b> ${esc(b.name)} charged ${fm(a.now)} on ${nice(a.date)}, ${a.now > a.was ? 'up' : 'down'} from ${fm(a.was)}. The bill's amount is now ${fm(a.now)}.
       <div class="btns" style="margin-top:8px"><button class="btn small ghost" data-act="priceSeen" data-bill="${a.billId}">Got it</button></div></div>`;
   }
+  if (att) h += `<h2>Needs your attention</h2>${att}`;
+  h += `<div class="btns" style="margin-top:14px"><button class="btn" data-act="spend">+ Record spending (groceries, gas, other purchases)</button></div>`;
+
+  // 2. Coming up: this week's bills, autopay bills waiting for the bank, and today's paycheck.
+  const wkEnd = addDays(t, 7);
+  h += section('Coming up: bills due this week', dueList(t, wkEnd), 'No bills due in the next 7 days.');
+  h += autopayHtml('waiting');
+  const todayPay = payList(t, addDays(t, 1));
+  if (todayPay.length) h += `<div class="banner good">Payday today: ${todayPay.map(p => esc(p.inc.name)).join(', ')}. <a href="#" data-act="tab" data-tab="pay">Confirm the amounts</a> when they land.</div>`;
+
+  // 3. Good to know (nice news, never a problem).
+  let good = '';
+  if (S.suggestSavings && c.hasPay && !(bankOn() && S.bank.suggest.length)) {
+    // Only suggest saving if the cushion stays above the buffer for the next few paydays too,
+    // without counting paychecks that haven't been confirmed yet.
+    const lowest = Math.min(c.safe - c.everyday, ...periods(4, false).out.map(p => p.run));
+    const extra = Math.floor((lowest - (S.savingsBuffer || 0)) / 25) * 25;
+    if (extra >= 25) good += `<div class="banner good">You could move <b>${fm(extra)}</b> to savings and still keep at least a ${fm(S.savingsBuffer)} cushion over the next few paydays.</div>`;
+  }
   const lastAuto = (S.bank.autoLog || [])[0];
-  if (bankOn() && lastAuto && Date.now() - lastAuto.at < 6 * HOUR) h += `<div class="banner good">Matched automatically from ${esc(bankName())}: ${lastAuto.names.map(esc).join(', ')}.</div>`;
+  if (bankOn() && lastAuto && Date.now() - lastAuto.at < 6 * HOUR) good += `<div class="banner good">Matched automatically from ${esc(bankName())}: ${lastAuto.names.map(esc).join(', ')}.</div>`;
+  h += good;
+
+  // 4. Everything else, folded away.
+  h += `<h2>More</h2>`;
 
   // Spending since the last payday: from the bank when connected, plus anything recorded by hand.
   const since = lastPayday();
@@ -1032,17 +1075,14 @@ function viewHome() {
   if (bankSpend.length || handSpend.length) {
     const total = sum(bankSpend.map(t => -t.amount + (feeOf[t.id] ? -feeOf[t.id].amount : 0))) + sum(handSpend.map(x => x.amount));
     const n = bankSpend.length + handSpend.length;
-    h += `<details class="card" style="margin-top:22px"><summary class="row"><span class="main"><div class="name">Spending since ${nice(since)}</div><div class="sub">${n} purchase${n === 1 ? '' : 's'}${bankOn() ? ` · from ${esc(bankName())}` : ''} · tap to see</div></span><span class="amt num">${fm(total)}</span></summary>
+    h += `<details class="card" style="margin-top:10px"><summary class="row"><span class="main"><div class="name">Spending since ${nice(since)}</div><div class="sub">${n} purchase${n === 1 ? '' : 's'}${bankOn() ? ` · from ${esc(bankName())}` : ''} · tap to see</div></span><span class="amt num">${fm(total)}</span></summary>
       ${handSpend.map(x => `<button class="row" data-act="spendEdit" data-id="${x.id}"><span class="dot ok"></span><span class="main"><div class="name">${esc(x.what)}${x.note ? ` <span class="muted" style="font-weight:400">· ${esc(x.note)}</span>` : ''}</div><div class="sub">${nice(x.date)} · ${x.cash ? 'cash, entered by hand' : 'entered by hand' + (bankOn() ? ', not at the bank yet' : '')}</div></span><span class="amt num">${fm(x.amount)}</span></button>`).join('')}
       ${bankSpend.map(t => { const l = labelFor(t); return `<button class="row" data-act="txWhat" data-id="${esc(t.id)}"><span class="dot ${t.pending ? 'soon' : 'ok'}"></span><span class="main"><div class="name">${esc(txName(t))}${l && l.cat ? ` <span class="tag">${esc(l.cat)}</span>` : ''}</div><div class="sub">${nice(t.date)}${t.pending ? ' · pending' : ''}${linked.has(t.id) ? ' · also entered by hand' : ''}${feeOf[t.id] ? ` · includes ${fm(-feeOf[t.id].amount)} fee` : ''}${l && l.name ? ` · bank: ${esc(t.desc)}` : ' · tap to name it'}</div></span><span class="amt num">${fm(-t.amount + (feeOf[t.id] ? -feeOf[t.id].amount : 0))}</span></button>`; }).join('')}
     </details>`;
   }
 
-  // Past-due bills are listed in the red alert near the top.
-  const wkEnd = addDays(t, 7);
-  h += section('Bills due this week', dueList(t, wkEnd), 'No bills due in the next 7 days.');
   const fonm = firstOfNextMonth(t);
-  if (wkEnd < fonm) h += section(`Bills due later in ${MONTHL[Number(t.slice(5, 7)) - 1]}`, dueList(wkEnd, fonm), 'No other bills due this month.');
+  if (wkEnd < fonm) h += section(`Bills due later in ${MONTHL[Number(t.slice(5, 7)) - 1]}`, dueList(wkEnd, fonm), 'No other bills due this month.', true);
   const nmStart = wkEnd > fonm ? wkEnd : fonm;
   h += section(`Bills due in ${MONTHL[Number(fonm.slice(5, 7)) - 1]}`, dueList(nmStart, firstOfNextMonth(fonm)), 'No bills due.', true);
   const paidThisMonth = dueList(firstOfMonth(t), fonm, false).filter(x => x.p);
@@ -1157,6 +1197,7 @@ function viewMore() {
     <div class="name">${pr && pr.name ? esc(pr.name) : 'Who uses this phone?'}</div>
     <div class="sub">${pr && pr.name ? 'This phone · tap to change' : 'Tap to add your name, so your own paychecks show as "Me"'}</div></span></button></div>
   ${syncCardHtml()}
+  ${notifyCardHtml()}
   <h2>Bank connection</h2><div class="card">${bankAccess()
     ? `<div class="pad"><div><b>${bankOn() ? `Connected to ${esc(bankName())}` : 'Connected, waiting for the first update'}</b></div>
         <div class="small muted">${bankBusy ? 'Updating now...' : S.bank.fetchedAt ? `${S.bank.bal ? bankAgeText() + '. ' : ''}SimpleFIN gets new data from the bank about once a day; the app checks for it every hour while open (last checked ${timeAgo(S.bank.fetchedAt)}).` : 'Not updated yet.'}</div>

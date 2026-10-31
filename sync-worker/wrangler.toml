@@ -2,6 +2,15 @@ name = "bill-planner-sync"
 main = "src/index.js"
 compatibility_date = "2025-06-01"
 
+# Every 15 minutes, send any reminders that are due.
+[triggers]
+crons = ["*/15 * * * *"]
+
+# Public half of the notification signing key (the private half is a Cloudflare secret: VAPID_PRIVATE_JWK).
+[vars]
+VAPID_PUBLIC = "BFm5sbs8xOWSsWH4UCisiZ3HgqaVdCP3T3Lf78DbRUrZqZO55hjrDlkQFxE0Z2IPNogL9BgPFaqKhS8_csft9Bg"
+VAPID_SUBJECT = "https://jwjones35.github.io/bill-planner/"
+
 [[d1_databases]]
 binding = "DB"
 database_name = "bill-planner-sync"

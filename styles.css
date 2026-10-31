@@ -73,6 +73,18 @@ button.card.row { border-top: 0; }
 .card + .card { margin-top: 10px; }
 .pad { padding: 14px 16px; }
 
+/* The one-line status at the top of Home: green, amber or red */
+.status { display: flex; gap: 12px; align-items: flex-start; padding: 14px 16px; border-radius: 14px; margin-bottom: 10px; border: 2px solid; }
+.status-dot { width: 14px; height: 14px; border-radius: 50%; flex: none; margin-top: 4px; }
+.status-title { font-size: 19px; font-weight: 700; line-height: 1.25; }
+.status-text { font-size: 14px; margin-top: 3px; color: var(--text); }
+.status-good { background: var(--good-bg); border-color: var(--good); }
+.status-good .status-dot { background: var(--good); } .status-good .status-title { color: var(--good); }
+.status-warn { background: var(--warn-bg); border-color: var(--warn); }
+.status-warn .status-dot { background: var(--warn); } .status-warn .status-title { color: var(--warn); }
+.status-bad { background: var(--bad-bg); border-color: var(--bad); }
+.status-bad .status-dot { background: var(--bad); } .status-bad .status-title { color: var(--bad); }
+
 /* Hero: safe to spend */
 .hero { padding: 18px 16px 14px; }
 .hero .label { color: var(--muted); font-size: 14px; }

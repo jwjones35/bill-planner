@@ -5,6 +5,20 @@ CREATE TABLE IF NOT EXISTS households (
   data TEXT NOT NULL,
   updated INTEGER NOT NULL
 );
+-- Phones that want notifications (their push address and keys), per household.
+CREATE TABLE IF NOT EXISTS subs (
+  endpoint TEXT PRIMARY KEY,
+  household TEXT NOT NULL,
+  p256dh TEXT NOT NULL,
+  auth TEXT NOT NULL,
+  created INTEGER NOT NULL
+);
+-- Each household's upcoming reminders: times plus text the phones encrypted (the storage can't read it).
+CREATE TABLE IF NOT EXISTS sched (
+  household TEXT PRIMARY KEY,
+  items TEXT NOT NULL,
+  updated INTEGER NOT NULL
+);
 -- One-time codes for adding a phone: the encrypted household key, gone after one use or 15 minutes.
 CREATE TABLE IF NOT EXISTS pairs (
   code TEXT PRIMARY KEY,

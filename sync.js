@@ -184,6 +184,8 @@ async function syncNow() {
     }
     cfg.last = Date.now(); setSyncCfg(Object.assign(syncCfg() || {}, { ver: cfg.ver, hash: cfg.hash, last: cfg.last }));
     syncStatus = { at: Date.now(), error: null };
+    // Keep the reminder list current (also from a phone without notifications, so the other phone's are right).
+    try { await uploadNotes(); } catch (e) { }
   } catch (e) {
     syncStatus.error = e.message || "Couldn't sync.";
   } finally {
@@ -252,8 +254,125 @@ async function syncJoin(raw) {
 }
 async function syncStop(deleteOnline) {
   const cfg = syncCfg(); if (!cfg) return;
+  try { await notifyOff(); } catch (e) { } // reminders come through sharing, so they stop too
   if (deleteOnline) { const k = await syncKeys(cfg); await api('DELETE', `/v1/h/${cfg.id}`, k.token); }
   setSyncCfg(null); syncSnap = null;
+}
+
+/* ---------- phone notifications ----------
+   The app works out upcoming reminders (bill due tomorrow, past due, autopay not through), encrypts each one with a
+   key made from the household secret, and stores the list with the sync storage. Every 15 minutes the storage sends
+   any that are due. The phone's service worker decrypts and shows them, so the storage never reads the text.
+   Any linked phone keeps the list up to date, so a bill paid on one phone stops the other's reminder too. */
+const VAPID_PUBLIC = 'BFm5sbs8xOWSsWH4UCisiZ3HgqaVdCP3T3Lf78DbRUrZqZO55hjrDlkQFxE0Z2IPNogL9BgPFaqKhS8_csft9Bg';
+const NOTIFY_KEY = 'billplanner.notify'; // { endpoint } on this phone when notifications are on
+const notifyCfg = () => { try { return JSON.parse(localStorage.getItem(NOTIFY_KEY)) || null; } catch (e) { return null; } };
+const setNotifyCfg = c => { try { if (c) localStorage.setItem(NOTIFY_KEY, JSON.stringify(c)); else localStorage.removeItem(NOTIFY_KEY); } catch (e) { } };
+const isStandalone = () => navigator.standalone === true || (window.matchMedia && matchMedia('(display-mode: standalone)').matches);
+const isIOS = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+async function noteKey(cfg) {
+  const base = await hkdfBase(b64uDec(cfg.secret));
+  return new Uint8Array(await crypto.subtle.deriveBits(hkdfParams('notes'), base, 256));
+}
+// The service worker reads the reminder key from IndexedDB (it can't use localStorage).
+function idbPut(k, v) {
+  return new Promise((res, rej) => {
+    const r = indexedDB.open('billplanner-sw', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('kv');
+    r.onsuccess = () => { const tx = r.result.transaction('kv', 'readwrite'); tx.objectStore('kv').put(v, k); tx.oncomplete = () => res(); tx.onerror = () => rej(tx.error); };
+    r.onerror = () => rej(r.error);
+  });
+}
+async function encryptNote(raw, obj) {
+  const key = await crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt']);
+  const iv = randBytes(12);
+  return `n1.${b64uEnc(iv)}.${b64uEnc(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, utf8(JSON.stringify(obj))))}`;
+}
+// The 9 AM time on a date, on this phone's clock.
+const at9 = d => { const [y, m, dd] = d.split('-').map(Number); return new Date(y, m - 1, dd, 9, 0).getTime(); };
+function buildNotes() {
+  if (!S) return [];
+  const now = Date.now(), t = today(), out = [];
+  for (const x of dueList(lookback(), addDays(t, 22))) {
+    if (x.unknown) continue;
+    const amt = (x.est ? 'about ' : '') + fm(x.amt), key = x.b.id + '|' + x.d;
+    if (!x.b.autopay) {
+      out.push({ at: at9(addDays(x.d, -1)), tag: 'due-' + key, title: `${x.b.name} is due tomorrow`, body: `${amt}. Mark it paid in Bill Planner when you pay it.` });
+      // Past due: the day after, then every 3 days until it's marked paid.
+      let d = addDays(x.d, 1); while (at9(d) <= now) d = addDays(d, 3);
+      out.push({ at: at9(d), tag: 'late-' + key, title: `${x.b.name} is past due`, body: `It was due ${nice(x.d)} (${amt}). Already paid? Mark it paid in Bill Planner.` });
+    } else if (bankOn()) { // (without a bank connection, autopay bills mark themselves paid on the due date)
+      const w = (S.autopayWait || {})[key];
+      if (w === 'wait') continue;
+      let d = w || x.d;
+      if (!w) { let n = 0; while (n <= AUTOPAY_GRACE) { d = addDays(d, 1); if (bizDays(addDays(d, -1), d)) n++; } }
+      while (at9(d) <= now) d = addDays(d, 3);
+      out.push({ at: at9(d), tag: 'ap-' + key, title: 'Autopay may not have gone through', body: `${x.b.name} (${amt}) was due ${nice(x.d)} and isn't showing at the bank yet.` });
+    }
+  }
+  return out.filter(i => i.at > now).sort((a, b) => a.at - b.at).slice(0, 150);
+}
+let lastNotesHash = null;
+// Keep the stored reminder list in step with the bills (called after each sync).
+async function uploadNotes() {
+  const cfg = syncCfg(); if (!cfg || !S) return;
+  const notes = buildNotes();
+  const hash = await sha256hex(JSON.stringify(notes));
+  if (hash === lastNotesHash) return;
+  const raw = await noteKey(cfg), k = await syncKeys(cfg);
+  const items = [];
+  for (const n of notes) items.push({ at: n.at, data: await encryptNote(raw, { title: n.title, body: n.body, tag: n.tag }) });
+  const r = await api('PUT', `/v1/h/${cfg.id}/sched`, k.token, { items });
+  if (r.status === 200) lastNotesHash = hash;
+}
+async function notifyOn() {
+  if (!pushSupported()) throw new Error("This phone can't show notifications from Bill Planner (iPhones need iOS 16.4 or newer).");
+  if (isIOS() && !isStandalone()) throw new Error('Open Bills from your Home Screen first; iPhones only allow notifications there.');
+  const perm = await Notification.requestPermission();
+  if (perm !== 'granted') throw new Error('Notifications are blocked. Turn them on in Settings › Notifications › Bills, then try again.');
+  // Notifications go through the sync storage, so this needs sharing turned on (with no other phone, it's private).
+  if (!syncLinked()) await syncStart();
+  const cfg = syncCfg(), k = await syncKeys(cfg);
+  await idbPut('noteKey', await noteKey(cfg));
+  const reg = await swReady();
+  const sub = (await reg.pushManager.getSubscription()) || await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64uDec(VAPID_PUBLIC) });
+  const j = sub.toJSON();
+  const r = await api('PUT', `/v1/h/${cfg.id}/sub`, k.token, { endpoint: j.endpoint, p256dh: j.keys.p256dh, auth: j.keys.auth });
+  if (r.status !== 200) throw new Error(`Couldn't turn on notifications (error ${r.status}).`);
+  setNotifyCfg({ endpoint: j.endpoint });
+  lastNotesHash = null; await uploadNotes();
+}
+// The app's service worker, but never wait more than 3 seconds for it.
+const swReady = () => Promise.race([navigator.serviceWorker.ready, new Promise((_, rej) => setTimeout(() => rej(new Error('The app is still starting up. Try again in a moment.')), 3000))]);
+async function notifyOff() {
+  const n = notifyCfg(), cfg = syncCfg();
+  if (!n) return;
+  try { const reg = await swReady(); const sub = await reg.pushManager.getSubscription(); if (sub) await sub.unsubscribe(); } catch (e) { }
+  if (n && cfg) { const k = await syncKeys(cfg); await api('DELETE', `/v1/h/${cfg.id}/sub`, k.token, { endpoint: n.endpoint }); }
+  setNotifyCfg(null);
+}
+async function notifyTest() {
+  const n = notifyCfg(), cfg = syncCfg(); if (!n || !cfg) throw new Error('Notifications are off.');
+  const k = await syncKeys(cfg);
+  const data = await encryptNote(await noteKey(cfg), { title: 'Bill Planner', body: 'Test notification: reminders will look like this.', tag: 'test' });
+  const r = await api('POST', `/v1/h/${cfg.id}/test`, k.token, { endpoint: n.endpoint, data });
+  if (r.status !== 200) throw new Error(`The test didn't go through (error ${r.j && r.j.status || r.status}${r.j && r.j.detail ? ': ' + r.j.detail : ''}). Try turning notifications off and on again.`);
+}
+function notifyCardHtml() {
+  const n = notifyCfg();
+  const perm = 'Notification' in window ? Notification.permission : 'unsupported';
+  let body;
+  if (n && perm === 'granted') body = `<div><b>Notifications are on for this phone</b></div>
+    <div class="small muted">You'll get a reminder at 9 AM the day before a bill is due, if a bill becomes past due, and if an autopay charge hasn't come out.</div>
+    <div class="btns"><button class="btn small ghost" data-act="syncNotifyTest">Send a test</button><button class="btn small ghost" data-act="syncNotifyOff">Turn off</button></div>`;
+  else if (!pushSupported()) body = `<p style="margin:0">This phone or browser can't show notifications from Bill Planner. iPhones need iOS 16.4 or newer.</p>`;
+  else if (isIOS() && !isStandalone()) body = `<p style="margin:0">To get notifications, open <b>Bills</b> from your Home Screen (not Safari) and turn them on there.</p>`;
+  else if (perm === 'denied') body = `<p style="margin:0">Notifications are blocked for Bill Planner. Turn them on in <b>Settings › Notifications › Bills</b>, then come back here.</p>`;
+  else body = `<p style="margin-top:0">Get a reminder on this phone, even when the app is closed: the day before a bill is due, when a bill becomes past due, and when an autopay charge hasn't come out.</p>
+    <div class="btns"><button class="btn" data-act="syncNotifyOn">Turn on notifications</button></div>
+    <p class="hint">Your phone will ask to allow notifications. The reminder text is locked with your app's key, so the storage that sends them can't read it.</p>`;
+  return `<h2>Phone notifications</h2><div class="card pad">${body}</div>`;
 }
 
 /* ---------- screens ---------- */
@@ -331,6 +450,9 @@ async function syncAct(act) {
     if (act === 'syncJoin') { sheetSyncJoin(); return true; }
     if (act === 'syncNow') { await syncNow(); render(); toast(syncStatus.error || 'Synced.'); return true; }
     if (act === 'syncOff') { sheetSyncOff(); return true; }
+    if (act === 'syncNotifyOn') { toast('Turning on notifications...'); await notifyOn(); render(); toast('Notifications are on. Tap "Send a test" to try one.'); return true; }
+    if (act === 'syncNotifyOff') { await notifyOff(); render(); toast('Notifications are off on this phone.'); return true; }
+    if (act === 'syncNotifyTest') { await notifyTest(); toast('Test sent. It should show up in a few seconds.'); return true; }
     if (act === 'syncOffYes') { await syncStop(false); closeSheet(); render(); toast('Sharing is off on this phone.'); return true; }
     if (act === 'syncOffAll') { await syncStop(true); closeSheet(); render(); toast('Sharing is off, and the online copy is deleted.'); return true; }
   } catch (e) { toast(e.message || 'Something went wrong.'); return true; }
