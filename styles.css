@@ -80,7 +80,9 @@ button.card.row { border-top: 0; }
 .hero details { margin-top: 8px; }
 .nextweek { border-top: 1px solid var(--line); margin-top: 12px; padding-top: 10px; }
 .nextweek .nw-label { color: var(--muted); font-size: 14px; }
-.nextweek .nw-amt { font-size: 26px; font-weight: 700; letter-spacing: -.01em; margin: 1px 0 3px; }
+.nextweek .nw-amt { font-size: 22px; font-weight: 700; letter-spacing: -.01em; margin: 1px 0 3px; }
+.nextweek .nw-keep { margin-top: 8px; font-size: 15px; }
+.nextweek .nw-keep b { font-size: 18px; }
 .hero summary { color: var(--brand); font-size: 14px; cursor: pointer; list-style: none; }
 .hero summary::-webkit-details-marker { display: none; }
 .breakdown { margin-top: 8px; font-size: 14px; }

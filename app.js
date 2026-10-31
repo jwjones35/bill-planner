@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's available to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '1.1.1';
+const APP_VERSION = '1.1.2';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -191,7 +191,7 @@ function nextWeek(c) {
 }
 
 // Pay periods ahead, each from one payday up to the next, with a running "cushion".
-function periods(n = 8) {
+function periods(n = 8, countTodaysPay = true) {
   const t = today();
   const c = calc();
   const pays = payList(addDays(t, 1), addDays(t, 120));
@@ -200,7 +200,7 @@ function periods(n = 8) {
   // Today's paychecks that haven't been confirmed yet are expected, so the projection includes them.
   const todayPays = payList(t, addDays(t, 1));
   // The forecast does allow for everyday spending, starting with the days until the next payday.
-  let run = c.safe - c.everyday + sum(todayPays.map(p => p.amt));
+  let run = c.safe - c.everyday + (countTodaysPay ? sum(todayPays.map(p => p.amt)) : 0);
   for (let i = 0; i < Math.min(n, dates.length); i++) {
     const d = dates[i];
     const end = dates[i + 1] || addDays(d, i > 0 ? diffDays(dates[i - 1], d) : 14);
@@ -272,12 +272,17 @@ function viewHome() {
         <div class="sum"><span>Available to spend</span><span>${fm(c.safe)}</span></div>
         ${bal.savings ? `<div class="muted"><span>Savings (not counted)</span><span>${fm(bal.savings)}</span></div>` : ''}
       </div></details>
-    ${nw ? `<div class="nextweek">
-      <div class="nw-label">Also covering next week's bills</div>
-      <div class="nw-amt num ${nw.available < 0 ? 'neg' : ''}">${nw.est ? '<span class="small muted" style="font-weight:400">about</span> ' : ''}${fm(nw.available)}</div>
-      <div class="small muted">Payday ${nice(nw.p1)}: about ${fm(nw.income)} coming in, ${fm(nw.billsTotal)} in bills due before ${nice(nw.p2)}.
-      ${nw.short > 0 ? `<b class="neg">That's ${fm(nw.short)} short</b>, so ${fm(nw.short)} of today's money is held back for it.` : `<b class="pos">The paychecks cover them</b>, so nothing extra needs to be held back.`}</div>
-    </div>` : ''}
+    ${nw ? (nw.short > 0 ? `<div class="nextweek">
+      <div class="nw-label">Next week's bills, ${nice(nw.p1)} to ${nice(addDays(nw.p2, -1))}</div>
+      <div class="nw-amt neg">Short by ${nw.est ? 'about ' : ''}${fm(nw.short)}</div>
+      <div class="small muted">Payday ${nice(nw.p1)} brings in about ${fm(nw.income)}, but ${fm(nw.billsTotal)} in bills are due before ${nice(nw.p2)}.</div>
+      <div class="nw-keep">Available to spend if you also cover next week: <b class="num ${nw.available < 0 ? 'neg' : ''}">${nw.est ? 'about ' : ''}${fm(nw.available)}</b></div>
+    </div>` : `<div class="nextweek">
+      <div class="nw-label">Next week's bills, ${nice(nw.p1)} to ${nice(addDays(nw.p2, -1))}</div>
+      <div class="nw-amt pos">&#10003; Covered</div>
+      <div class="small muted">Payday ${nice(nw.p1)} brings in about ${fm(nw.income)}. Bills due before ${nice(nw.p2)}: ${fm(nw.billsTotal)}, leaving about ${fm(nw.income - nw.billsTotal)}.
+      Nothing needs to be held back from today's ${fm(c.safe)}.</div>
+    </div>`) : ''}
   </div>`;
 
   // Paychecks that should have arrived but weren't confirmed
@@ -287,8 +292,9 @@ function viewHome() {
   if (todayPay.length) h += `<div class="banner good">Payday today: ${todayPay.map(p => esc(p.inc.name)).join(', ')}. <a href="#" data-act="tab" data-tab="pay">Confirm the amounts</a> when they land.</div>`;
   if (c.unknown.length) h += `<div class="banner warn">${c.unknown.map(x => `<b>${esc(x.b.name)}</b>`).join(', ')} ${c.unknown.length === 1 ? 'has' : 'have'} no amount yet, so ${c.unknown.length === 1 ? "it isn't" : "they aren't"} counted. Tap the bill to add one.</div>`;
   if (S.suggestSavings && c.hasPay) {
-    // Only suggest saving if the cushion stays above the buffer for the next few paydays too.
-    const lowest = Math.min(c.safe - c.everyday, ...periods(4).out.map(p => p.run));
+    // Only suggest saving if the cushion stays above the buffer for the next few paydays too,
+    // without counting paychecks that haven't been confirmed yet.
+    const lowest = Math.min(c.safe - c.everyday, ...periods(4, false).out.map(p => p.run));
     const extra = Math.floor((lowest - (S.savingsBuffer || 0)) / 25) * 25;
     if (extra >= 25) h += `<div class="banner good">You could move <b>${fm(extra)}</b> to savings and still keep at least a ${fm(S.savingsBuffer)} cushion over the next few paydays.</div>`;
   }
