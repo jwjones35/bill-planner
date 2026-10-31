@@ -1,7 +1,7 @@
 {
   "name": "Bill Planner",
   "short_name": "Bills",
-  "description": "Bills, paydays and what's safe to spend. Your data stays on your device.",
+  "description": "Bills, paydays and what's available to spend. Your data stays on your device.",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
