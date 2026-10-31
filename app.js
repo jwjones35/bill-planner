@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's available to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '1.5.2';
+const APP_VERSION = '1.5.3';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -962,15 +962,68 @@ function viewWelcome() {
 }
 
 /* ---------- sheets (pop-up forms) ---------- */
+/* Pop-up screens ("sheets"): a Close button that stays at the top, swipe down to close, and the page behind
+   them held still while one is open (otherwise a swipe scrolls the page behind instead). */
+let pageScrollY = 0;
+function lockPage(on) {
+  const b = document.body;
+  if (on && !b.classList.contains('sheet-open')) {
+    pageScrollY = window.scrollY;
+    b.style.top = `-${pageScrollY}px`;
+    b.classList.add('sheet-open');
+  } else if (!on && b.classList.contains('sheet-open')) {
+    b.classList.remove('sheet-open');
+    b.style.top = '';
+    window.scrollTo(0, pageScrollY);
+  }
+}
 function openSheet(html) {
   const sh = $('#sheet');
-  sh.innerHTML = html;
+  sh.innerHTML = `<div class="sheet-top"><span class="grab" aria-hidden="true"></span><button type="button" class="sheet-x" data-act="close">Close ✕</button></div>` + html;
   sh.hidden = false; $('#scrim').hidden = false;
+  sh.style.transform = '';
+  sh.scrollTop = 0;
+  lockPage(true);
+  // The app checks forms itself and shows problems inside the form.
+  sh.querySelectorAll('form').forEach(f => { f.noValidate = true; });
   sh.querySelectorAll('input[inputmode=decimal]:not([placeholder])').forEach(i => { i.placeholder = '0.00'; });
   const f = sh.querySelector('input:not([type=checkbox]):not([type=hidden]), select');
   if (f && !('ontouchstart' in window)) f.focus();
 }
-function closeSheet() { $('#sheet').hidden = true; $('#scrim').hidden = true; $('#sheet').innerHTML = ''; }
+function closeSheet() {
+  const sh = $('#sheet');
+  sh.hidden = true; $('#scrim').hidden = true; sh.innerHTML = ''; sh.style.transform = '';
+  lockPage(false);
+}
+// Show what's wrong at the top of the form (and next to the field), where it can't be missed.
+function formError(f, msg, field) {
+  let box = f.querySelector('.form-error');
+  if (!box) { box = document.createElement('div'); box.className = 'form-error'; box.setAttribute('role', 'alert'); f.insertBefore(box, f.firstChild); }
+  box.textContent = msg;
+  f.querySelectorAll('.field-bad').forEach(x => x.classList.remove('field-bad'));
+  const el = field && f.querySelector(`[name="${field}"]`);
+  if (el) el.classList.add('field-bad');
+  $('#sheet').scrollTop = 0;
+}
+// Swipe down on a pop-up (when it's scrolled to the top) to close it.
+(function swipeToClose() {
+  const sh = $('#sheet');
+  let startY = null, dy = 0;
+  sh.addEventListener('touchstart', e => {
+    startY = (sh.scrollTop <= 0 && !e.target.closest('input, textarea, select')) ? e.touches[0].clientY : null; dy = 0;
+  }, { passive: true });
+  sh.addEventListener('touchmove', e => {
+    if (startY == null) return;
+    dy = e.touches[0].clientY - startY;
+    if (dy > 0 && sh.scrollTop <= 0) { sh.style.transform = `translateY(${dy}px)`; e.preventDefault(); }
+    else { sh.style.transform = ''; }
+  }, { passive: false });
+  sh.addEventListener('touchend', () => {
+    if (startY == null) return;
+    if (dy > 90) closeSheet(); else sh.style.transform = '';
+    startY = null; dy = 0;
+  });
+})();
 let toastTimer;
 function toast(msg) {
   const t = $('#toast'); t.textContent = msg; t.hidden = false;
@@ -1463,7 +1516,7 @@ document.addEventListener('submit', e => {
   switch (f.id) {
     case 'fPay': {
       const b = findB(id); const amount = num(fd.get('amount'));
-      if (amount == null) { toast('Enter the amount paid.'); return; }
+      if (amount == null) { formError(f, 'Enter the amount you paid.', 'amount'); return; }
       if (bankOn()) {
         // The bank balance doesn't show it yet; subtract it until the matching bank transaction appears.
         S.payments.push({ billId: b.id, due: f.dataset.d, paidOn: fd.get('paidOn') || today(), amount, fee: b.fee && amount > b.fee ? b.fee : 0, adjusted: false, inTransit: true, at: Date.now() });
@@ -1478,14 +1531,27 @@ document.addEventListener('submit', e => {
     }
     case 'fRecv': {
       const inc = findI(id); const amount = num(fd.get('amount'));
-      if (amount == null) { toast('Enter the amount.'); return; }
+      if (amount == null) { formError(f, 'Enter the amount that landed in checking.', 'amount'); return; }
       const adjusted = !bankOn() && fd.get('adjust') === 'on'; // with a bank connected, the deposit is already in the balance
       S.receipts.push({ incomeId: inc.id, date: f.dataset.d, amount, adjusted });
       if (adjusted) S.balances.checking = (S.balances.checking || 0) + amount;
       save(); closeSheet(); render(); toast(`${inc.name} received.`); break;
     }
     case 'fBill': {
-      const fr = readFreq(fd); if (!fr) { toast(fd.get('freq') === 'monthly' ? 'Enter a day of the month (1-31).' : 'Pick the next date.'); return; }
+      if (!String(fd.get('name') || '').trim()) { formError(f, 'Give the bill a name.', 'name'); return; }
+      let fr = readFreq(fd);
+      if (!fr) {
+        if (fd.get('active') !== 'on') {
+          // Not being paid right now (for example a placeholder): it can be saved without a date.
+          fr = { freq: fd.get('freq'), day: fd.get('freq') === 'monthly' ? (parseInt(fd.get('day'), 10) || null) : null, anchor: null };
+        } else {
+          formError(f, fd.get('freq') === 'monthly'
+            ? 'Enter the day of the month this bill is due (1-31). Not sure yet? Untick "Still paying this" to save it for later.'
+            : 'Pick the date of the next payment in "Next date". Not sure yet? Untick "Still paying this" to save it for later.',
+            fd.get('freq') === 'monthly' ? 'day' : 'anchor');
+          return;
+        }
+      }
       const match = String(fd.get('match') || '').split(',').map(normText).filter(Boolean);
       const o = Object.assign({ name: fd.get('name').trim(), amount: num(fd.get('amount')), fee: num(fd.get('fee')) || 0, match, varies: fd.get('varies') === 'on', active: fd.get('active') === 'on', note: fd.get('note').trim() }, fr);
       let bill;
@@ -1501,14 +1567,16 @@ document.addEventListener('submit', e => {
       save(); closeSheet(); render(); toast('Bill saved.'); break;
     }
     case 'fInc': {
-      const fr = readFreq(fd); if (!fr) { toast(fd.get('freq') === 'monthly' ? 'Enter a day of the month (1-31).' : 'Pick the next payday.'); return; }
-      const amount = num(fd.get('amount')); if (amount == null) { toast('Enter the usual amount.'); return; }
+      if (!String(fd.get('name') || '').trim()) { formError(f, 'Give the paycheck a name, for example the employer.', 'name'); return; }
+      const fr = readFreq(fd); if (!fr) { formError(f, fd.get('freq') === 'monthly' ? 'Enter the day of the month this paycheck arrives (1-31).' : 'Pick the date of the next payday in "Next date".', fd.get('freq') === 'monthly' ? 'day' : 'anchor'); return; }
+      const amount = num(fd.get('amount')); if (amount == null) { formError(f, 'Enter the usual take-home amount.', 'amount'); return; }
       const o = Object.assign({ name: fd.get('name').trim(), owner: fd.get('owner').trim(), amount, varies: fd.get('varies') === 'on', active: fd.get('active') === 'on' }, fr);
       if (id) Object.assign(findI(id), o); else S.incomes.push(Object.assign({ id: uid() }, o));
       save(); closeSheet(); render(); toast('Paycheck saved.'); break;
     }
     case 'fAside': {
       const name = fd.get('name').trim(); let amount = num(fd.get('amount')) || 0;
+      if (!name) { formError(f, 'Say what the money is set aside for.', 'name'); return; }
       const spent = num(fd.get('spent'));
       if (spent) { amount = Math.max(0, amount - spent); if (fd.get('adjust') === 'on') S.balances.checking = (S.balances.checking || 0) - spent; }
       if (id) Object.assign(S.setAsides.find(a => a.id === id), { name, amount }); else S.setAsides.push({ id: uid(), name, amount });
@@ -1516,7 +1584,7 @@ document.addEventListener('submit', e => {
     }
     case 'fSpend': {
       const amount = num(fd.get('amount'));
-      if (!amount || amount <= 0) { toast('Enter the amount spent.'); return; }
+      if (!amount || amount <= 0) { formError(f, 'Enter the amount spent.', 'amount'); return; }
       const cash = fd.get('cash') === 'on';
       const inTransit = !cash && bankOn();
       const adjusted = !cash && !bankOn() && fd.get('adjust') === 'on';
@@ -1529,13 +1597,14 @@ document.addEventListener('submit', e => {
       save(); closeSheet(); render(); toast(`${fm(amount)} for ${fd.get('what').toLowerCase()} recorded.`); break;
     }
     case 'fInfo': {
+      if (!String(fd.get('name') || '').trim()) { formError(f, 'Give it a name.', 'name'); return; }
       const o = { name: fd.get('name').trim(), amount: num(fd.get('amount')), freq: fd.get('freq'), endMonth: fd.get('endMonth') || null, note: fd.get('note').trim() };
       if (id) Object.assign(S.infos.find(a => a.id === id), o); else S.infos.push(Object.assign({ id: uid() }, o));
       save(); closeSheet(); render(); break;
     }
     case 'fBal': {
       const bank = num(fd.get('checking'));
-      if (bank == null) { toast('Enter the checking balance.'); return; }
+      if (bank == null) { formError(f, 'Enter the checking balance your bank shows.', 'checking'); return; }
       const still = new Set(fd.getAll('pend'));
       let pendingSum = 0;
       for (const p of pendingItems()) {
@@ -1549,7 +1618,7 @@ document.addEventListener('submit', e => {
     }
     case 'fConnect': {
       const token = (fd.get('token') || '').trim();
-      if (!token) { toast('Paste the setup token from SimpleFIN.'); return; }
+      if (!token) { formError(f, 'Paste the setup token from SimpleFIN in the box.', 'token'); return; }
       const btn = f.querySelector('button.btn:not(.ghost)'); btn.disabled = true; btn.textContent = 'Connecting...';
       // Backup method: an already-claimed SimpleFIN access URL can be pasted instead of a setup token.
       const direct = /^https:\/\/[^:@\/\s]+:[^@\/\s]+@\S+$/.test(token);
@@ -1566,7 +1635,7 @@ document.addEventListener('submit', e => {
     }
     case 'fManual': {
       const amount = num(fd.get('amount'));
-      if (amount == null) { toast("Type the available balance from your bank's app."); return; }
+      if (amount == null) { formError(f, "Type the available balance shown in your bank's app.", 'amount'); return; }
       S.bank.manual = { amount, at: Date.now(), keep: fd.getAll('keep'), bankBal: S.bank.bal ? S.bank.bal.checking : null };
       save(); closeSheet(); render();
       toast("Using the balance from your bank's app until the bank connection has newer data.");
