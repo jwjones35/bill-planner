@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's available to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '2.2.2';
+const APP_VERSION = '2.2.3';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -2147,6 +2147,8 @@ async function refreshAll() {
   if (syncLinked()) await syncNow();
   await fetchBank(false);
   if (!S) return;
+  // Make sure every gas-station purchase already in the bank data has its record (also right after an update).
+  if (spendScan()) save();
   // Spending watch: send any questions and alerts that are due, and show this phone's own question.
   try { await spendAlerts(); } catch (e) { }
   if (syncLinked()) {

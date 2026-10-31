@@ -132,7 +132,7 @@ function meterHtml() {
     <div class="small muted" style="margin-bottom:6px">Eating out, snacks and drinks, alcohol and entertainment since Monday${pct != null ? ` · <b>${pct}%</b> of a week's take-home pay` : ''}. Gas-station snacks are worked out automatically.</div>
     ${bars}
     ${who.length ? `<div class="small" style="margin-top:8px">${who.map(([w, v]) => `<b>${esc(w === me() ? 'Me' : w)}</b> ${fm(v)}`).join(' · ')}</div>` : ''}
-    ${s.unsplit.length ? `<div class="small muted" style="margin-top:6px">${s.unsplit.length} gas-station purchase${s.unsplit.length === 1 ? '' : 's'} (${fm(sum(s.unsplit.map(p => p.amt)))}) not split yet: add your vehicles under More › Spending watch.</div>` : ''}
+    ${s.unsplit.length ? `<div class="small muted" style="margin-top:6px">${s.unsplit.length} gas-station purchase${s.unsplit.length === 1 ? '' : 's'} (${fm(sum(s.unsplit.map(p => p.amt)))}) not split into fuel and snacks yet. ${vehicles().length ? (profile() ? 'They will be the next time the bank data updates.' : 'Add your name under More › Profile first.') : 'Add your vehicles under More › Spending watch.'}</div>` : ''}
     <div class="btns" style="margin-top:8px"><button class="btn small ghost" data-act="spLimits">Weekly limits</button></div></div>`;
 }
 
@@ -215,12 +215,13 @@ function stationTag(t) {
 /* ---------- gas-station records, and the one question: whose card ---------- */
 const openQs = () => (S.fuelQ || []).filter(q => !whoOfRecord(q) && !q.unrecognized);
 const myQs = () => (me() ? openQs() : []);
-// Every new gas-station charge (since the vehicles were added) gets a record, used for the split.
+// Every gas-station charge the bank shows (its last 5 weeks) gets a record, used for the split. (Records used to
+// start only from the day the vehicles were added, which left that week's earlier purchases unsplit.)
 function spendScan() {
   if (!fuelOn() || !bankOn()) return false;
   S.fuelQ = S.fuelQ || [];
   let added = false;
-  for (const t of spendingTx(S.fuelSince || today(), addDays(today(), 1))) {
+  for (const t of spendingTx(addDays(today(), -35), addDays(today(), 1))) {
     if (txCat(t) !== 'station' || S.fuelQ.some(q => q.txId === t.id)) continue;
     S.fuelQ.push({ id: 'q' + t.id, txId: t.id, txDate: t.date, date: t.date, merchant: storeName(t), total: Math.round(-t.amount * 100) / 100, card: cardOf(t.desc), created: Date.now() });
     added = true;

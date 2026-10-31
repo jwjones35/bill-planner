@@ -4,6 +4,10 @@
    Every release adds an entry here, in plain words: added, changed, fixed, removed. */
 const CHANGELOG = [
   {
+    v: '2.2.3', date: '2026-11-01',
+    fixed: ['Gas-station purchases from before the vehicles were added showed as "not split yet" with a message to add vehicles. Every gas-station purchase the bank shows is now split into fuel and snacks.']
+  },
+  {
     v: '2.2.2', date: '2026-10-31',
     added: ['Streaming bills (Netflix, Disney+, Hulu, Spotify and the like) now count toward the weekly entertainment limit. They\'re still bills for "Available to spend".',
       'Each bill has a "Counts as entertainment" switch. Amazon Prime is off, since it\'s mostly used for household shopping.',
