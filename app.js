@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's available to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '1.5.7';
+const APP_VERSION = '1.5.8';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -392,7 +392,8 @@ function applyBank(j, now) {
    (bill payments can take 3-5 business days; card purchases a day or two). Without a bank connection it's the
    balance kept up to date by hand. */
 // Bill payments stay counted until the bank shows them or the user answers the "not at the bank yet" notice on Home.
-const inTransitPays = () => S.payments.filter(p => p.inTransit && !p.txId && !p.cleared && p.paidOn >= S.setupDate);
+// (Only payments marked paid while a bank is connected get inTransit, so no date limit is needed.)
+const inTransitPays = () => S.payments.filter(p => p.inTransit && !p.txId && !p.cleared);
 // Bills past their due date and not marked paid.
 const pastDue = () => dueList(lookback(), today());
 // Business days (Mon-Fri) from one date to another, for "bill payments can take 3-5 business days".
