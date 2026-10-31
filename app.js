@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's available to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '2.1.0';
+const APP_VERSION = '2.1.1';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 

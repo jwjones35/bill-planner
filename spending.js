@@ -145,13 +145,15 @@ async function loadLocalPrice() {
   const k = await syncKeys(cfg);
   const r = await api('GET', `/v1/h/${cfg.id}/fuelprice?check=1`, k.token);
   if (r.status !== 200 || !r.j || !r.j.price) return localPriceCache;
-  localPriceCache = { price: r.j.price, low: r.j.low, high: r.j.high, stations: r.j.stations, at: r.j.at, got: Date.now() };
+  localPriceCache = { price: r.j.price, low: r.j.low, high: r.j.high, stations: r.j.stations, at: r.j.at, source: r.j.source, period: r.j.period, got: Date.now() };
   try { localStorage.setItem('billplanner.localPrice', JSON.stringify(localPriceCache)); } catch (e) { }
   return localPriceCache;
 }
 const localPrice = () => {
   if (!localPriceCache) { try { localPriceCache = JSON.parse(localStorage.getItem('billplanner.localPrice')); } catch (e) { } }
-  return localPriceCache && Date.now() - localPriceCache.at < 4 * 86400000 ? localPriceCache.price : null;
+  // (The government price is weekly, so it stays good for 10 days; a daily local price for 4.)
+  const maxAge = localPriceCache && localPriceCache.source === 'eia' ? 10 : 4;
+  return localPriceCache && Date.now() - localPriceCache.at < maxAge * 86400000 ? localPriceCache.price : null;
 };
 // The price per gallon to judge by: today's local price, or else the usual price from your own fill-ups.
 const refPrice = () => localPrice() || recentPrice();
@@ -230,7 +232,7 @@ function sheetFuelQ(q, warn) {
     <label for="fqV">Vehicle</label><select id="fqV" name="vehicle">${vs.map(v => `<option value="${v.id}"${(a.vehicle || mineV.id) === v.id ? ' selected' : ''}>${esc(v.name)}${v.driver ? ` (${esc(v.driver)})` : ''}</option>`).join('')}</select>
     <label class="check"><input type="checkbox" name="none" data-act="fqNone"${a.none ? ' checked' : ''}> No fuel, it was all snacks, drinks or other things</label>
     <div data-fq="fuel"${a.none ? ' hidden' : ''}>
-      <p class="hint" style="margin-top:10px"><b>Be exact:</b> copy the fuel cost from the pump or the receipt. It's checked against the miles the vehicle usually drives${localPrice() ? ` and today's local price (${fm(localPrice())} a gallon)` : ''}.</p>
+      <p class="hint" style="margin-top:10px"><b>Be exact:</b> copy the fuel cost from the pump or the receipt. It's checked against the miles the vehicle usually drives${localPrice() ? ` and the current gas price (about ${fm(localPrice())} a gallon)` : ''}.</p>
       <label for="fqF">Fuel cost</label><input id="fqF" name="fuel" inputmode="decimal" placeholder="20.00" value="${a.fuel || ''}">
       <details${a.gallons || a.odo ? ' open' : ''}><summary class="small" style="margin-top:10px;color:var(--brand)">Gallons or odometer (only if you know them)</summary>
         <div class="two"><div><label for="fqG">Gallons</label><input id="fqG" name="gallons" inputmode="decimal" placeholder="7.142" value="${a.gallons || ''}"></div>
@@ -429,7 +431,11 @@ function spendMoreHtml() {
   const vs = vehicles(), cards = recentCards(), L = limits();
   return `<h2>Spending watch</h2><div class="card">
     <button class="row" data-act="spLimits"><span class="main"><div class="name">Weekly limits</div><div class="sub">${FUN_CATS.map(c => `${CATS[c].name} ${fm(L[c])}`).join(' · ')}</div></span></button>
-    <div class="row" style="cursor:default"><span class="main"><div class="name">Unleaded near home</div><div class="sub">${localPrice() ? `${fm(localPrice())} a gallon (typical of ${localPriceCache.stations} stations within about 30 miles, ${whenText(localPriceCache.at)})` : 'Not available yet. Checked once a day from Google\'s gas station listings.'}</div></span></div>
+    <div class="row" style="cursor:default"><span class="main"><div class="name">Unleaded gas price</div><div class="sub">${localPrice()
+      ? (localPriceCache.source === 'eia'
+        ? `${fm(localPrice())} a gallon: U.S. government weekly average for Oklahoma's and Arkansas's regions${localPriceCache.period ? `, week of ${nice(localPriceCache.period)}` : ''}`
+        : `${fm(localPrice())} a gallon (typical of ${localPriceCache.stations} stations within about 30 miles, ${whenText(localPriceCache.at)})`)
+      : 'Not available yet. Checked once a day.'}</div></span></div>
     ${vs.map(v => { const a = actualMpg(v), m = milesPerDay(v); return `<button class="row" data-act="spVehicle" data-id="${v.id}"><span class="main"><div class="name">${esc(v.name)}</div><div class="sub">${v.driver ? esc(v.driver) + ' · ' : ''}${v.mpgLow}-${v.mpgHigh} mpg${a ? ` (actual ${a.toFixed(1)})` : ''} · ${v.tank} gal tank${m ? ` · about ${Math.round(m.mpd)} miles a day${m.real ? ' (from odometer)' : ''}` : ''}</div></span></button>`; }).join('')}
     <button class="row" data-act="spVehicle"><span class="main"><div class="name">+ Add a vehicle</div><div class="sub">${vs.length ? 'Another vehicle' : 'Turns on the gas-station questions and the fuel check'}</div></span></button>
     ${cards.map(c => `<button class="row" data-act="spCard" data-id="${c}"><span class="main"><div class="name">Card ending ${c}</div><div class="sub">${(S.cards || {})[c] ? esc(S.cards[c]) + "'s card" : 'Whose card is this? Tap to choose'}</div></span></button>`).join('')}

@@ -4,8 +4,12 @@
    Every release adds an entry here, in plain words: added, changed, fixed, removed. */
 const CHANGELOG = [
   {
+    v: '2.1.1', date: '2026-10-31',
+    changed: ['The gas price now comes from the U.S. government\'s free weekly average for Oklahoma\'s and Arkansas\'s regions, so no card or sign-up with Google is needed.']
+  },
+  {
     v: '2.1.0', date: '2026-10-31',
-    added: ['Today\'s unleaded price within about 30 miles of home is checked once a day (from Google\'s gas station listings). See it under More › Spending watch.',
+    added: ['The current unleaded gas price is looked up automatically (the U.S. government\'s weekly average for Oklahoma\'s and Arkansas\'s regions). See it under More › Spending watch.',
       'Each vehicle has a "miles driven on a usual day" guess, used to check that the fuel bought over 4 weeks matches the driving.'],
     changed: ['The gas-station question only needs the fuel cost now. Gallons are worked out from the local price, and gallons and the odometer are optional.',
       'An odometer reading entered now and then replaces the miles-a-day guess with the real miles.'],

@@ -27,7 +27,9 @@ CREATE TABLE IF NOT EXISTS prices (
   low REAL,
   high REAL,
   stations INTEGER,
-  at INTEGER NOT NULL
+  at INTEGER NOT NULL,
+  source TEXT,
+  period TEXT
 );
 -- One-time codes for adding a phone: the encrypted household key, gone after one use or 15 minutes.
 CREATE TABLE IF NOT EXISTS pairs (

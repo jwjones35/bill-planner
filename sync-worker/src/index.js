@@ -103,10 +103,30 @@ export const _test = { encryptPush, vapid };
    Needs two Cloudflare secrets: GOOGLE_PLACES_KEY (made by the user in Google Cloud) and HOME_LATLNG ("lat,lng" of
    the home town; up to about 31 miles around it are searched). Stores the median price of stations that updated
    their unleaded price in the last 3 days. */
+/* The free U.S. government price (EIA, Energy Information Administration): the weekly average retail price of
+   regular unleaded for the Midwest (Oklahoma) and the Gulf Coast (Arkansas), averaged, since purchases happen on
+   both sides of the state line around Fort Smith. Needs the Cloudflare secret EIA_KEY (free, no card). */
+const EIA_SERIES = ['EMM_EPMR_PTE_R20_DPG', 'EMM_EPMR_PTE_R30_DPG'];
+async function fetchEia(env) {
+  const q = new URLSearchParams({ api_key: String(env.EIA_KEY).replace(/^﻿/, '').trim(), frequency: 'weekly', 'data[0]': 'value', 'sort[0][column]': 'period', 'sort[0][direction]': 'desc', length: '10' });
+  EIA_SERIES.forEach(s => q.append('facets[series][]', s));
+  const r = await fetch('https://api.eia.gov/v2/petroleum/pri/gnd/data/?' + q.toString());
+  if (!r.ok) return { error: r.status, detail: (await r.text()).slice(0, 300) };
+  const rows = ((await r.json()).response || {}).data || [];
+  const latest = {};
+  for (const x of rows) if (!latest[x.series] || x.period > latest[x.series].period) latest[x.series] = x;
+  const vals = Object.values(latest).map(x => Number(x.value)).filter(v => v > 1 && v < 10);
+  if (!vals.length) return { error: 'no prices' };
+  const price = vals.reduce((a, b) => a + b, 0) / vals.length;
+  const period = Object.values(latest).map(x => x.period).sort().pop();
+  await env.DB.prepare("INSERT OR REPLACE INTO prices (area, price, low, high, stations, at, source, period) VALUES ('home', ?, ?, ?, 0, ?, 'eia', ?)").bind(price, Math.min(...vals), Math.max(...vals), Date.now(), period).run();
+  return { price, period };
+}
 async function fetchPrices(env, force) {
-  if (!env.GOOGLE_PLACES_KEY || !env.HOME_LATLNG) return { skipped: 'not set up' };
   const last = await env.DB.prepare("SELECT at FROM prices WHERE area = 'home'").first();
   if (!force && last && Date.now() - last.at < 20 * 3600000) return { skipped: 'fresh' };
+  if (env.EIA_KEY) return fetchEia(env);
+  if (!env.GOOGLE_PLACES_KEY || !env.HOME_LATLNG) return { skipped: 'not set up' };
   const [lat, lng] = String(env.HOME_LATLNG).split(',').map(Number);
   const r = await fetch('https://places.googleapis.com/v1/places:searchNearby', {
     method: 'POST',
@@ -123,7 +143,7 @@ async function fetchPrices(env, force) {
   if (!ps.length) return { error: 'no prices', places: (j.places || []).length };
   ps.sort((a, b) => a - b);
   const med = ps.length % 2 ? ps[(ps.length - 1) / 2] : (ps[ps.length / 2 - 1] + ps[ps.length / 2]) / 2;
-  await env.DB.prepare("INSERT OR REPLACE INTO prices (area, price, low, high, stations, at) VALUES ('home', ?, ?, ?, ?, ?)").bind(med, ps[0], ps[ps.length - 1], ps.length, Date.now()).run();
+  await env.DB.prepare("INSERT OR REPLACE INTO prices (area, price, low, high, stations, at, source, period) VALUES ('home', ?, ?, ?, ?, ?, 'google', NULL)").bind(med, ps[0], ps[ps.length - 1], ps.length, Date.now()).run();
   return { price: med, stations: ps.length };
 }
 
@@ -198,7 +218,7 @@ export default {
       if (m[2] === 'fuelprice' && req.method === 'GET') {
         let info = null;
         if (url.searchParams.get('check') === '1') info = await fetchPrices(env).catch(e => ({ error: String(e) }));
-        const p = await env.DB.prepare("SELECT price, low, high, stations, at FROM prices WHERE area = 'home'").first();
+        const p = await env.DB.prepare("SELECT price, low, high, stations, at, source, period FROM prices WHERE area = 'home'").first();
         return json(req, 200, p ? Object.assign({}, p, { info }) : { price: null, info });
       }
       // Which people have a phone set up for notifications (their codes only).
