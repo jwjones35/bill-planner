@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's available to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '1.6.0';
+const APP_VERSION = '1.6.1';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -78,6 +78,33 @@ function save() {
   S.balances.savings = r2(S.balances.savings);
   try { localStorage.setItem(KEY, JSON.stringify(S)); }
   catch (e) { toast('Could not save on this device. Make a backup file from More.'); }
+}
+
+/* ---------- profile: who uses this phone ----------
+   Kept on this phone only and never put in backups, so a shared copy can be personal on each phone.
+   Paychecks store real names; this phone shows "Me" for its own person. */
+const PROFILE_KEY = 'billplanner.profile';
+function profile() { try { return JSON.parse(localStorage.getItem(PROFILE_KEY)) || null; } catch (e) { return null; } }
+function setProfile(p) { try { localStorage.setItem(PROFILE_KEY, JSON.stringify(p)); } catch (e) { } }
+const sameName = (a, b) => !!a && !!b && String(a).trim().toLowerCase() === String(b).trim().toLowerCase();
+const isMeWord = o => /^(me|myself|mine)$/i.test(String(o || '').trim());
+function ownerLabel(o) {
+  if (!o) return '';
+  const p = profile();
+  return isMeWord(o) || (p && sameName(o, p.name)) ? 'Me' : o;
+}
+// Everyone named in the app (paycheck owners plus this phone's name), without "Me".
+function householdNames() {
+  const m = new Map(), add = n => { if (n && !isMeWord(n)) m.set(String(n).trim().toLowerCase(), String(n).trim()); };
+  const p = profile(); if (p) add(p.name);
+  if (S) S.incomes.forEach(i => add(i.owner));
+  return [...m.values()];
+}
+// The app asks "whose phone is this?" by itself only once per phone; after that it's under More > Profile.
+const ASKED_KEY = 'billplanner.profileAsked';
+function askProfileOnce() {
+  try { if (profile() || localStorage.getItem(ASKED_KEY)) return; localStorage.setItem(ASKED_KEY, '1'); } catch (e) { return; }
+  sheetProfile(true);
 }
 
 /* ---------- schedules ---------- */
@@ -1013,7 +1040,7 @@ function viewPay() {
 function incRow(p) {
   return `<button class="row" data-act="recv" data-id="${p.inc.id}" data-d="${p.d}">
     <span class="dot ${p.r ? 'paid' : p.d < today() ? 'soon' : 'ok'}"></span>
-    <span class="main"><div class="name">${esc(p.inc.name)}</div><div class="sub">${p.inc.owner ? `<b>${esc(p.inc.owner)}</b> · ` : ''}${nice(p.d)} · ${p.r ? 'received' : p.d < today() ? 'tap to confirm' : rel(p.d)}</div></span>
+    <span class="main"><div class="name">${esc(p.inc.name)}</div><div class="sub">${p.inc.owner ? `<b>${esc(ownerLabel(p.inc.owner))}</b> · ` : ''}${nice(p.d)} · ${p.r ? 'received' : p.d < today() ? 'tap to confirm' : rel(p.d)}</div></span>
     <span class="amt num">${p.est ? '~' : ''}${fm(p.amt)}</span></button>`;
 }
 
@@ -1060,7 +1087,11 @@ function viewBills() {
 
 function viewMore() {
   const bal = S.balances;
+  const pr = profile();
   let h = `<h1>More</h1>
+  <h2>Profile</h2><div class="card"><button class="row" data-act="profile"><span class="main">
+    <div class="name">${pr && pr.name ? esc(pr.name) : 'Who uses this phone?'}</div>
+    <div class="sub">${pr && pr.name ? 'This phone · tap to change' : 'Tap to add your name, so your own paychecks show as "Me"'}</div></span></button></div>
   <h2>Bank connection</h2><div class="card">${bankAccess()
     ? `<div class="pad"><div><b>${bankOn() ? `Connected to ${esc(bankName())}` : 'Connected, waiting for the first update'}</b></div>
         <div class="small muted">${bankBusy ? 'Updating now...' : S.bank.fetchedAt ? `${S.bank.bal ? bankAgeText() + '. ' : ''}SimpleFIN gets new data from the bank about once a day; the app checks for it every hour while open (last checked ${timeAgo(S.bank.fetchedAt)}).` : 'Not updated yet.'}</div>
@@ -1279,15 +1310,29 @@ function sheetBill(b, draft) {
 // List of all paychecks, opened from the Paydays tab.
 function sheetIncomes() {
   openSheet(`<h3>Paychecks</h3><p class="hint">Tap one to change its name, whose it is, schedule or usual amount.</p>
-    <div class="card" style="margin-top:10px">${S.incomes.map(i => `<button class="row" data-act="editInc" data-id="${i.id}"><span class="main"><div class="name">${esc(i.name)}${i.active === false ? ' <span class="tag">stopped</span>' : ''}</div><div class="sub">${i.owner ? `<b>${esc(i.owner)}</b> · ` : ''}${freqText(i)}${i.varies ? ' · amount varies' : ''}</div></span><span class="amt num">${incAmt(i).est ? '~' : ''}${fm(incAmt(i).v)}</span></button>`).join('') || '<div class="empty">No paychecks yet.</div>'}</div>
+    <div class="card" style="margin-top:10px">${S.incomes.map(i => `<button class="row" data-act="editInc" data-id="${i.id}"><span class="main"><div class="name">${esc(i.name)}${i.active === false ? ' <span class="tag">stopped</span>' : ''}</div><div class="sub">${i.owner ? `<b>${esc(ownerLabel(i.owner))}</b> · ` : ''}${freqText(i)}${i.varies ? ' · amount varies' : ''}</div></span><span class="amt num">${incAmt(i).est ? '~' : ''}${fm(incAmt(i).v)}</span></button>`).join('') || '<div class="empty">No paychecks yet.</div>'}</div>
     <div class="btns"><button class="btn ghost" data-act="close">Done</button><button class="btn" data-act="editInc">+ Add paycheck</button></div>`);
+}
+// The profile page. ask: the one-time question, with a quick button for each name already on paychecks.
+function sheetProfile(ask) {
+  const p = profile() || {};
+  const names = householdNames();
+  openSheet(`<form id="fProfile"><h3>${ask ? 'Whose phone is this?' : 'Profile'}</h3>
+    <p class="hint">Just for this phone, and not put in backups, so a shared copy can be personal on each phone: your own paychecks show as "Me", everyone else's by the name on them.</p>
+    ${ask && names.length ? `<div class="btns" style="flex-wrap:wrap">${names.map(n => `<button type="button" class="btn ghost" data-act="profilePick" data-name="${esc(n)}">This is ${esc(n)}'s phone</button>`).join('')}</div>
+      <p class="hint">Or type your name below.</p>` : ''}
+    <label for="prName">Your name</label><input id="prName" name="name" value="${esc(p.name || '')}" placeholder="Your first name" autocapitalize="words" required>
+    <div class="btns">${ask ? '<button type="button" class="btn ghost" data-act="close">Skip</button>' : cancelBtn}<button class="btn">Save</button></div>
+    ${ask ? '<p class="hint">You can change this any time under More › Profile.</p>' : ''}</form>`);
 }
 function sheetInc(i) {
   const x = i || { freq: 'biweekly' };
   openSheet(`<form id="fInc" data-id="${i ? i.id : ''}">
     <h3>${i ? 'Edit paycheck' : 'New paycheck'}</h3>
     <div class="two"><div><label for="iName">Name</label><input id="iName" name="name" value="${esc(x.name || '')}" required></div>
-    <div><label for="iOwner">Whose</label><input id="iOwner" name="owner" value="${esc(x.owner || '')}" placeholder="A name"></div></div>
+    <div><label for="iOwner">Whose</label><input id="iOwner" name="owner" list="ownerNames" value="${esc(x.owner || '')}" placeholder="A name">
+      <datalist id="ownerNames">${householdNames().map(n => `<option value="${esc(n)}">`).join('')}</datalist></div></div>
+    ${profile() ? '' : `<p class="hint">Tip: set up your profile under More, so your own paychecks show as "Me".</p>`}
     ${freqFields(x, 'i')}
     <label for="iAmt">Usual take-home amount</label><input id="iAmt" name="amount" inputmode="decimal" value="${money2(x.amount)}" required>
     <label class="check"><input type="checkbox" name="varies"${x.varies ? ' checked' : ''}> The amount changes (extra hours and so on)</label>
@@ -1461,7 +1506,9 @@ async function shareOrDownload(name, text, type) {
 }
 function backup() {
   S.lastBackup = today(); save();
-  shareOrDownload(`bill-planner-backup-${today()}.json`, JSON.stringify(S, null, 1), 'application/json');
+  // madeBy: whose phone made it, so "Me" in the file can be turned into that name on another phone.
+  const p = profile();
+  shareOrDownload(`bill-planner-backup-${today()}.json`, JSON.stringify(Object.assign({}, S, { madeBy: p ? p.name : null }), null, 1), 'application/json');
 }
 function restoreFile(file) {
   const r = new FileReader();
@@ -1472,9 +1519,15 @@ function restoreFile(file) {
     if (S && (S.bills.length || S.incomes.length) && !confirm('Replace everything in the app with this file?')) return;
     // A starter file begins counting from the day it is loaded, so earlier bills don't show as overdue.
     if (data.starter) { data.setupDate = today(); delete data.starter; }
+    // "Me" in the file means whoever made the backup.
+    const madeBy = data.madeBy; delete data.madeBy;
+    if (madeBy) (data.incomes || []).forEach(i => { if (isMeWord(i.owner)) i.owner = madeBy; });
     S = normalize(data);
     save(); tab = data.balances && data.balances.updated ? 'home' : 'more'; closeSheet(); render();
-    if (tab === 'more') { setTimeout(sheetBalances, 400); }
+    // A backup restored on a new phone is its first use there: ask once whose phone it is.
+    let asked = true; try { asked = !!localStorage.getItem(ASKED_KEY); } catch (e) { }
+    if (!profile() && !asked) setTimeout(askProfileOnce, 400);
+    else if (tab === 'more') { setTimeout(sheetBalances, 400); }
     toast(`Loaded ${S.bills.length} bills and ${S.incomes.length} paychecks.${tab === 'more' ? ' Now enter your balances.' : ''}`);
   };
   r.readAsText(file);
@@ -1529,7 +1582,7 @@ function demoState() {
   s.everydayPerWeek = 450; s.savingsBuffer = 200;
   s.incomes = [
     { id: uid(), name: 'Acme Corp', owner: 'Me', freq: 'biweekly', anchor: nextFri, amount: 1450, varies: false },
-    { id: uid(), name: 'Corner Cafe', owner: 'Partner', freq: 'weekly', anchor: nextFri, amount: 380, varies: true }
+    { id: uid(), name: 'Corner Cafe', owner: 'Alex', freq: 'weekly', anchor: nextFri, amount: 380, varies: true }
   ];
   const B = (name, day, amount, varies) => ({ id: uid(), name, freq: 'monthly', day, amount, varies: !!varies });
   s.bills = [B('Rent', 1, 950), B('Electric', 9, 140, true), B('Phone', 18, 85), B('Car insurance', 15, 110),
@@ -1631,6 +1684,12 @@ document.addEventListener('click', e => {
       const a = (S.bank.feeAlerts || []).find(x => x.billId === el.dataset.bill && x.date === el.dataset.date);
       if (a) a.seen = true;
       save(); render(); break;
+    }
+    case 'profile': sheetProfile(false); break;
+    case 'profilePick': {
+      const f = document.getElementById('fProfile'); if (!f) break;
+      f.elements.name.value = el.dataset.name;
+      f.requestSubmit(); break;
     }
     case 'priceSeen': {
       const a = (S.bank.priceAlerts || []).find(x => x.billId === el.dataset.bill);
@@ -1776,7 +1835,10 @@ document.addEventListener('submit', e => {
       if (!String(fd.get('name') || '').trim()) { formError(f, 'Give the paycheck a name, for example the employer.', 'name'); return; }
       const fr = readFreq(fd); if (!fr) { formError(f, fd.get('freq') === 'monthly' ? 'Enter the day of the month this paycheck arrives (1-31).' : 'Pick the date of the next payday in "Next date".', fd.get('freq') === 'monthly' ? 'day' : 'anchor'); return; }
       const amount = num(fd.get('amount')); if (amount == null) { formError(f, 'Enter the usual take-home amount.', 'amount'); return; }
-      const o = Object.assign({ name: fd.get('name').trim(), owner: fd.get('owner').trim(), amount, varies: fd.get('varies') === 'on', active: fd.get('active') === 'on' }, fr);
+      // "Me" is saved as this phone's name, so the paycheck still shows the right person on another phone.
+      let owner = fd.get('owner').trim();
+      if (isMeWord(owner) && profile() && profile().name) owner = profile().name;
+      const o = Object.assign({ name: fd.get('name').trim(), owner, amount, varies: fd.get('varies') === 'on', active: fd.get('active') === 'on' }, fr);
       if (id) Object.assign(findI(id), o); else S.incomes.push(Object.assign({ id: uid() }, o));
       save(); closeSheet(); render(); toast('Paycheck saved.'); break;
     }
@@ -1801,6 +1863,18 @@ document.addEventListener('submit', e => {
       const cutoff = addDays(today(), -120);
       S.spending = S.spending.filter(x => x.date >= cutoff);
       save(); closeSheet(); render(); toast(`${fm(amount)} for ${fd.get('what').toLowerCase()} recorded.`); break;
+    }
+    case 'fProfile': {
+      const name = String(fd.get('name') || '').trim();
+      if (!name || isMeWord(name)) { formError(f, 'Type your first name, so other phones can tell your paychecks apart.', 'name'); return; }
+      const old = profile() || {};
+      // Paychecks marked "Me" become this name. Renaming yourself (Jim to Jimmy) renames your paychecks too, but
+      // picking someone who already has paychecks (this is really Daoma's phone) renames nothing.
+      const renameMe = old.name && !sameName(old.name, name) && !S.incomes.some(i => sameName(i.owner, name));
+      for (const i of S.incomes) if (isMeWord(i.owner) || (renameMe && sameName(i.owner, old.name))) i.owner = name;
+      setProfile({ name });
+      save(); closeSheet(); render(); toast(`Saved. This is ${name}'s phone.`);
+      break;
     }
     case 'fInfo': {
       if (!String(fd.get('name') || '').trim()) { formError(f, 'Give it a name.', 'name'); return; }
@@ -1923,6 +1997,8 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) { re
 
 render();
 fetchBank(false); // updates from the bank if connected and the last update is over an hour old
+// The one-time "Whose phone is this?" question, once there are paychecks to label.
+if (S && S.incomes.length) setTimeout(askProfileOnce, 600);
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => { });
 if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === '127.0.0.1' || location.hostname === 'localhost')) {
   // When a new version of the app takes over, reload once so it shows straight away.
