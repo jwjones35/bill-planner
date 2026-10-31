@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's available to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '1.5.4';
+const APP_VERSION = '1.5.5';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -191,9 +191,20 @@ function nextWeek(c) {
   const bills = dueList(p1, p2);
   const billsTotal = sum(bills.map(x => x.amt));
   const income = sum(pays1.map(p => p.amt));
-  const est = pays1.some(p => p.est) || bills.some(x => x.est);
+  let est = pays1.some(p => p.est) || bills.some(x => x.est);
   const short = Math.max(0, billsTotal - income);
-  return { p1, p2, income, billsTotal, bills, short, est, available: c.safe + income - billsTotal };
+  // Look at the pay periods after next week: when a payday's pay won't cover the bills due before the payday after it,
+  // the difference has to come out of next week's money, so it is held back.
+  const ahead = [...new Set(payList(p2, addDays(p2, 36)).map(p => p.d))].sort();
+  let run = 0, low = 0, keepTo = null, keepFrom = null;
+  for (let i = 0; i < ahead.length - 1; i++) {
+    const inc = sum(payList(ahead[i], addDays(ahead[i], 1)).map(p => p.amt));
+    const bl = dueList(ahead[i], ahead[i + 1]);
+    run += inc - sum(bl.map(x => x.amt));
+    if (run < low - 0.004) { low = run; keepTo = ahead[i + 1]; if (!keepFrom) keepFrom = ahead[i]; est = est || bl.some(x => x.est); }
+  }
+  const keep = Math.max(0, -low);
+  return { p1, p2, income, billsTotal, bills, short, est, keep, keepFrom, keepTo, available: c.safe + income - billsTotal - keep };
 }
 
 /* ---------- recorded spending (groceries, gas, unexpected costs...) ---------- */
@@ -741,7 +752,7 @@ function viewHome() {
     ${nw ? `<div class="nextweek">
       <div class="nw-label">Estimated available to spend next week, ${nice(nw.p1)} to ${nice(addDays(nw.p2, -1))}</div>
       <div class="nw-amt num ${nw.available < 0 ? 'neg' : ''}">${nw.est ? '<span class="small muted" style="font-weight:400">about</span> ' : ''}${fm(nw.available)}</div>
-      <div class="small muted">Today's ${fm(c.safe)} + about ${fm(nw.income)} pay on ${nice(nw.p1)} − ${fm(nw.billsTotal)} in bills due before ${nice(nw.p2)}. If nothing else is spent before payday. Recording spending lowers both numbers.</div>
+      <div class="small muted">Today's ${fm(c.safe)} + about ${fm(nw.income)} pay on ${nice(nw.p1)} − ${fm(nw.billsTotal)} in bills due before ${nice(nw.p2)}${nw.keep > 0 ? ` − ${fm(nw.keep)} kept for bills due ${nice(nw.keepFrom)} to ${nice(addDays(nw.keepTo, -1))} that the pay coming then won't cover` : ''}. If nothing else is spent before payday. Recording spending lowers both numbers.</div>
       ${nw.short > 0 ? `<div class="nw-warn">Next week's pay is ${fm(nw.short)} less than next week's bills, so keep at least <b>${fm(nw.short)}</b> of today's money for them.</div>` : ''}
     </div>` : ''}
   </div>
