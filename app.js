@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's available to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '1.1.2';
+const APP_VERSION = '1.2.0';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -53,15 +53,15 @@ function blankState() {
     version: 1, setupDate: today(),
     balances: { checking: 0, savings: 0, updated: null },
     everydayPerWeek: 0, savingsBuffer: 300, suggestSavings: true,
-    incomes: [], bills: [], payments: [], receipts: [], setAsides: [], infos: []
+    incomes: [], bills: [], payments: [], receipts: [], setAsides: [], infos: [], spending: []
   };
 }
 function normalize(s) {
   const b = blankState();
   const out = Object.assign(b, s || {});
   out.balances = Object.assign(blankState().balances, out.balances || {});
-  for (const k of ['incomes', 'bills', 'payments', 'receipts', 'setAsides', 'infos']) if (!Array.isArray(out[k])) out[k] = [];
-  for (const k of ['incomes', 'bills', 'setAsides', 'infos']) out[k].forEach(x => { if (!x.id) x.id = uid(); });
+  for (const k of ['incomes', 'bills', 'payments', 'receipts', 'setAsides', 'infos', 'spending']) if (!Array.isArray(out[k])) out[k] = [];
+  for (const k of ['incomes', 'bills', 'setAsides', 'infos', 'spending']) out[k].forEach(x => { if (!x.id) x.id = uid(); });
   return out;
 }
 function load() {
@@ -174,8 +174,9 @@ function calc() {
   const safe = (S.balances.checking || 0) - billsTotal - aside;
   return { np, hasPay: !!nextPayday(), bills, billsTotal, days, everyday, aside, safe, unknown: bills.filter(x => x.unknown) };
 }
-/* Next week check: do the next payday's paychecks cover the bills due before the payday after it?
-   If not, the shortfall has to come out of today's money, so it is held back. Bills only, like the main number. */
+/* Estimated available to spend next week = today's available + next payday's expected pay - bills due before the
+   payday after it. It assumes nothing else is spent before payday, so recorded spending lowers both figures.
+   "short" is how much next week's pay falls below next week's bills (that much of today's money must be kept). */
 function nextWeek(c) {
   if (!c.hasPay) return null;
   const p1 = c.np;
@@ -187,8 +188,18 @@ function nextWeek(c) {
   const income = sum(pays1.map(p => p.amt));
   const est = pays1.some(p => p.est) || bills.some(x => x.est);
   const short = Math.max(0, billsTotal - income);
-  return { p1, p2, income, billsTotal, bills, short, est, available: c.safe - short };
+  return { p1, p2, income, billsTotal, bills, short, est, available: c.safe + income - billsTotal };
 }
+
+/* ---------- recorded spending (groceries, gas, unexpected costs...) ---------- */
+const SPEND_KINDS = ['Groceries', 'Gas', 'Eating out', 'Household', 'Unexpected', 'Other'];
+// The most recent payday on or before today; spending is totalled from there.
+function lastPayday() {
+  const t = today();
+  const l = payList(addDays(t, -16), addDays(t, 1), false);
+  return l.length ? l[l.length - 1].d : addDays(t, -6);
+}
+const spendSince = d => S.spending.filter(x => x.date >= d).sort((a, b) => b.date.localeCompare(a.date) || (b.at || 0) - (a.at || 0));
 
 // Pay periods ahead, each from one payday up to the next, with a running "cushion".
 function periods(n = 8, countTodaysPay = true) {
@@ -261,7 +272,7 @@ function viewHome() {
   <div class="card hero">
     <div class="label">Available to spend ${c.hasPay ? `until payday, ${nice(c.np)}` : 'for the next 2 weeks'}</div>
     <div class="big num ${c.safe < 0 ? 'neg' : ''}">${fm(c.safe)}</div>
-    <div class="small muted">Checking minus the bills due before payday.${nw ? ' Next week is checked below.' : ' Bills after payday are not included, so keep some back for next week.'}</div>
+    <div class="small muted">Checking minus the bills due before payday.${nw ? ' Next week is estimated below.' : ' Bills after payday are not included, so keep some back for next week.'}</div>
     <div class="small muted" style="margin-top:4px">${stale} · <a href="#" data-act="balances">Update</a></div>
     ${c.everyday ? `<div class="small muted" style="margin-top:4px">Usual everyday spending until then: about ${fm(c.everyday)} <span class="tag">not subtracted</span></div>` : ''}
     <details><summary>How this is worked out</summary>
@@ -272,18 +283,14 @@ function viewHome() {
         <div class="sum"><span>Available to spend</span><span>${fm(c.safe)}</span></div>
         ${bal.savings ? `<div class="muted"><span>Savings (not counted)</span><span>${fm(bal.savings)}</span></div>` : ''}
       </div></details>
-    ${nw ? (nw.short > 0 ? `<div class="nextweek">
-      <div class="nw-label">Next week's bills, ${nice(nw.p1)} to ${nice(addDays(nw.p2, -1))}</div>
-      <div class="nw-amt neg">Short by ${nw.est ? 'about ' : ''}${fm(nw.short)}</div>
-      <div class="small muted">Payday ${nice(nw.p1)} brings in about ${fm(nw.income)}, but ${fm(nw.billsTotal)} in bills are due before ${nice(nw.p2)}.</div>
-      <div class="nw-keep">Available to spend if you also cover next week: <b class="num ${nw.available < 0 ? 'neg' : ''}">${nw.est ? 'about ' : ''}${fm(nw.available)}</b></div>
-    </div>` : `<div class="nextweek">
-      <div class="nw-label">Next week's bills, ${nice(nw.p1)} to ${nice(addDays(nw.p2, -1))}</div>
-      <div class="nw-amt pos">&#10003; Covered</div>
-      <div class="small muted">Payday ${nice(nw.p1)} brings in about ${fm(nw.income)}. Bills due before ${nice(nw.p2)}: ${fm(nw.billsTotal)}, leaving about ${fm(nw.income - nw.billsTotal)}.
-      Nothing needs to be held back from today's ${fm(c.safe)}.</div>
-    </div>`) : ''}
-  </div>`;
+    ${nw ? `<div class="nextweek">
+      <div class="nw-label">Estimated available to spend next week, ${nice(nw.p1)} to ${nice(addDays(nw.p2, -1))}</div>
+      <div class="nw-amt num ${nw.available < 0 ? 'neg' : ''}">${nw.est ? '<span class="small muted" style="font-weight:400">about</span> ' : ''}${fm(nw.available)}</div>
+      <div class="small muted">Today's ${fm(c.safe)} + about ${fm(nw.income)} pay on ${nice(nw.p1)} − ${fm(nw.billsTotal)} in bills due before ${nice(nw.p2)}. If nothing else is spent before payday. Recording spending lowers both numbers.</div>
+      ${nw.short > 0 ? `<div class="nw-warn">Next week's pay is ${fm(nw.short)} less than next week's bills, so keep at least <b>${fm(nw.short)}</b> of today's money for them.</div>` : ''}
+    </div>` : ''}
+  </div>
+  <div class="btns" style="margin-top:10px"><button class="btn" data-act="spend">+ Record spending (groceries, gas, other purchases)</button></div>`;
 
   // Paychecks that should have arrived but weren't confirmed
   const missed = payList(addDays(t, -10) > S.setupDate ? addDays(t, -10) : S.setupDate, t);
@@ -297,6 +304,14 @@ function viewHome() {
     const lowest = Math.min(c.safe - c.everyday, ...periods(4, false).out.map(p => p.run));
     const extra = Math.floor((lowest - (S.savingsBuffer || 0)) / 25) * 25;
     if (extra >= 25) h += `<div class="banner good">You could move <b>${fm(extra)}</b> to savings and still keep at least a ${fm(S.savingsBuffer)} cushion over the next few paydays.</div>`;
+  }
+
+  // Spending recorded since the last payday
+  const since = lastPayday();
+  const spent = spendSince(since);
+  if (spent.length) {
+    h += `<details class="card" style="margin-top:22px"><summary class="row"><span class="main"><div class="name">Spending recorded since ${nice(since)}</div><div class="sub">${spent.length} purchase${spent.length === 1 ? '' : 's'} · tap to see or remove</div></span><span class="amt num">${fm(sum(spent.map(x => x.amount)))}</span></summary>
+      ${spent.map(x => `<button class="row" data-act="spendEdit" data-id="${x.id}"><span class="dot ok"></span><span class="main"><div class="name">${esc(x.what)}${x.note ? ` <span class="muted" style="font-weight:400">· ${esc(x.note)}</span>` : ''}</div><div class="sub">${nice(x.date)}</div></span><span class="amt num">${fm(x.amount)}</span></button>`).join('')}</details>`;
   }
 
   const overdue = dueList(lookback(), t);
@@ -577,16 +592,23 @@ function sheetInfo(i) {
     ${i ? `<div class="btns"><button type="button" class="btn danger" data-act="delInfo" data-id="${i.id}">Remove</button></div>` : ''}
   </form>`);
 }
-// Payments marked paid in the app that may not have reached the bank yet (they can take 3-5 business days).
-const pendingPays = () => S.payments.filter(p => !p.cleared && p.paidOn && diffDays(p.paidOn, today()) <= 14 && p.paidOn >= S.setupDate)
-  .sort((a, b) => b.paidOn.localeCompare(a.paidOn));
+/* Bill payments and recorded purchases that may not have reached the bank yet.
+   Bill payments can take 3-5 business days; card purchases usually show within a day or two. */
+function pendingItems() {
+  const t = today();
+  const bills = S.payments.filter(p => !p.cleared && p.adjusted !== false && p.paidOn && diffDays(p.paidOn, t) <= 14 && p.paidOn >= S.setupDate)
+    .map(p => { const b = S.bills.find(x => x.id === p.billId); return { key: 'b|' + p.billId + '|' + p.due, rec: p, name: b ? b.name : 'Bill', amount: p.amount, date: p.paidOn, tick: diffDays(p.paidOn, t) <= 7 }; });
+  const spends = S.spending.filter(x => !x.cleared && x.adjusted !== false && diffDays(x.date, t) <= 14)
+    .map(x => ({ key: 's|' + x.id, rec: x, name: x.what + (x.note ? ' · ' + x.note : ''), amount: x.amount, date: x.date, tick: diffDays(x.date, t) <= 2 }));
+  return bills.concat(spends).sort((a, b) => b.date.localeCompare(a.date));
+}
 function sheetBalances() {
-  const pend = pendingPays();
-  openSheet(`<form id="fBal"><h3>Balances</h3><p class="hint">Copy the balances your bank app shows. Bills you mark paid and paychecks you confirm keep checking up to date between updates.</p>
+  const pend = pendingItems();
+  openSheet(`<form id="fBal"><h3>Balances</h3><p class="hint">Copy the balances your bank app shows. Bills you mark paid, spending you record and paychecks you confirm keep checking up to date between updates.</p>
     <label for="cBal">Checking, as your bank shows it</label><input id="cBal" name="checking" inputmode="decimal" value="${pend.length ? '' : money2(S.balances.checking)}" placeholder="0.00" required>
-    ${pend.length ? `<label>Paid in the app but not showing in the bank yet?</label>
-      <p class="hint" style="margin-top:0">Payments can take 3-5 business days to post. Ticked ones are subtracted from the bank's number. Untick any that already show in your bank.</p>
-      ${pend.map(p => { const b = S.bills.find(x => x.id === p.billId); return `<label class="check"><input type="checkbox" name="pend" value="${esc(p.billId + '|' + p.due)}"${diffDays(p.paidOn, today()) <= 7 ? ' checked' : ''}> ${esc(b ? b.name : 'Bill')} · ${fm(p.amount)} <span class="muted small">paid ${nice(p.paidOn)}</span></label>`; }).join('')}` : ''}
+    ${pend.length ? `<label>Entered in the app but not showing in the bank yet?</label>
+      <p class="hint" style="margin-top:0">Bill payments can take 3-5 business days to post, purchases a day or two. Ticked ones are subtracted from the bank's number. Untick any that already show in your bank.</p>
+      ${pend.map(p => `<label class="check"><input type="checkbox" name="pend" value="${esc(p.key)}"${p.tick ? ' checked' : ''}> ${esc(p.name)} · ${fm(p.amount)} <span class="muted small">${nice(p.date)}</span></label>`).join('')}` : ''}
     <label for="sBal">Savings</label><input id="sBal" name="savings" inputmode="decimal" value="${money2(S.balances.savings)}">
     <div class="btns">${cancelBtn}<button class="btn">Save</button></div></form>`);
 }
@@ -597,6 +619,23 @@ function sheetPlanning() {
     <label class="check"><input type="checkbox" name="suggest"${S.suggestSavings ? ' checked' : ''}> Suggest moving extra money to savings</label>
     <label for="sBuf">Cushion to keep before suggesting savings</label><input id="sBuf" name="buffer" inputmode="decimal" value="${money2(S.savingsBuffer)}">
     <div class="btns">${cancelBtn}<button class="btn">Save</button></div></form>`);
+}
+function sheetSpend() {
+  openSheet(`<form id="fSpend"><h3>Record spending</h3>
+    <p class="hint">Anything that comes out of checking that isn't a bill: groceries, gas, a repair, a surprise cost. It lowers "available to spend" right away.</p>
+    <label for="xAmt">Amount spent</label><input id="xAmt" name="amount" inputmode="decimal" required>
+    <label for="xWhat">What it was for</label><select id="xWhat" name="what">${SPEND_KINDS.map(k => `<option>${k}</option>`).join('')}</select>
+    <label for="xNote">Note</label><input id="xNote" name="note" placeholder="Optional, for example the store">
+    <label for="xDate">Date</label><input id="xDate" name="date" type="date" value="${today()}" required>
+    <label class="check"><input type="checkbox" name="adjust" checked> Subtract it from my checking balance</label>
+    <p class="hint">Untick this if you have already updated your balance since spending it.</p>
+    <div class="btns">${cancelBtn}<button class="btn">Record</button></div></form>`);
+}
+function sheetSpendEdit(x) {
+  openSheet(`<h3>${esc(x.what)}${x.note ? ' · ' + esc(x.note) : ''}</h3><p class="muted">Recorded for ${nice(x.date)}</p>
+    <p style="font-size:28px;font-weight:700" class="num">${fm(x.amount)}</p>
+    ${x.adjusted ? `<p class="hint">Removing it adds ${fm(x.amount)} back to your checking balance.</p>` : ''}
+    <div class="btns">${cancelBtn}<button class="btn danger" data-act="delSpend" data-id="${x.id}">Remove this spending</button></div>`);
 }
 
 /* ---------- files: backup, restore, calendar ---------- */
@@ -718,6 +757,13 @@ document.addEventListener('click', e => {
     case 'editBill': sheetBill(id ? findB(id) : null); break;
     case 'editInc': sheetInc(id ? findI(id) : null); break;
     case 'incomes': sheetIncomes(); break;
+    case 'spend': sheetSpend(); break;
+    case 'spendEdit': { const x = S.spending.find(s => s.id === id); if (x) sheetSpendEdit(x); break; }
+    case 'delSpend': {
+      const x = S.spending.find(s => s.id === id);
+      if (x) { if (x.adjusted) S.balances.checking = (S.balances.checking || 0) + x.amount; S.spending = S.spending.filter(s => s !== x); save(); }
+      closeSheet(); render(); toast('Spending removed.'); break;
+    }
     case 'editAside': sheetAside(id ? S.setAsides.find(a => a.id === id) : null); break;
     case 'editInfo': sheetInfo(id ? S.infos.find(a => a.id === id) : null); break;
     case 'balances': sheetBalances(); break;
@@ -788,6 +834,17 @@ document.addEventListener('submit', e => {
       if (id) Object.assign(S.setAsides.find(a => a.id === id), { name, amount }); else S.setAsides.push({ id: uid(), name, amount });
       save(); closeSheet(); render(); toast(spent ? `${fm(spent)} spent, ${fm(amount)} left set aside.` : 'Saved.'); break;
     }
+    case 'fSpend': {
+      const amount = num(fd.get('amount'));
+      if (!amount || amount <= 0) { toast('Enter the amount spent.'); return; }
+      const adjusted = fd.get('adjust') === 'on';
+      S.spending.push({ id: uid(), date: fd.get('date') || today(), amount, what: fd.get('what'), note: fd.get('note').trim(), adjusted, at: Date.now() });
+      if (adjusted) S.balances.checking = (S.balances.checking || 0) - amount;
+      // Keep the history from growing forever: drop records older than about 4 months
+      const cutoff = addDays(today(), -120);
+      S.spending = S.spending.filter(x => x.date >= cutoff);
+      save(); closeSheet(); render(); toast(`${fm(amount)} for ${fd.get('what').toLowerCase()} recorded.`); break;
+    }
     case 'fInfo': {
       const o = { name: fd.get('name').trim(), amount: num(fd.get('amount')), freq: fd.get('freq'), endMonth: fd.get('endMonth') || null, note: fd.get('note').trim() };
       if (id) Object.assign(S.infos.find(a => a.id === id), o); else S.infos.push(Object.assign({ id: uid() }, o));
@@ -798,8 +855,8 @@ document.addEventListener('submit', e => {
       if (bank == null) { toast('Enter the checking balance.'); return; }
       const still = new Set(fd.getAll('pend'));
       let pendingSum = 0;
-      for (const p of pendingPays()) {
-        if (still.has(p.billId + '|' + p.due)) pendingSum += p.amount; else p.cleared = true;
+      for (const p of pendingItems()) {
+        if (still.has(p.key)) pendingSum += p.amount; else p.rec.cleared = true;
       }
       S.balances.checking = bank - pendingSum;
       S.balances.pending = pendingSum;

@@ -1,6 +1,6 @@
 // Offline support: keeps a copy of the app's own files so it opens without a connection.
 // Bump VERSION whenever any app file changes, so phones pick up the update.
-const VERSION = 'bp-1.1.2';
+const VERSION = 'bp-1.2.0';
 const FILES = ['./', 'index.html', 'styles.css', 'app.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
 
