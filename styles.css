@@ -173,6 +173,19 @@ input[type=checkbox] { width: 22px; min-height: 22px; height: 22px; margin: 0; a
 }
 #tabs button .ti { font-size: 22px; line-height: 24px; font-weight: 400; }
 #tabs button.on { color: var(--brand); }
+#tabs button { position: relative; }
+#tabs .badge {
+  position: absolute; top: 3px; left: calc(50% + 6px);
+  min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px;
+  background: var(--bad); color: #fff; font-size: 11px; line-height: 18px; text-align: center;
+}
+/* Alerts on Home: past-due bills (red) and payments not at the bank yet (amber, red when slow) */
+.alert-bad { border: 2px solid var(--bad); background: var(--bad-bg); }
+.alert-bad > .pad:first-child, .alert-bad > .pad:first-child b { color: var(--bad); }
+.alert-warn { border: 2px solid var(--warn); }
+.alert-warn > .pad:first-child b { color: var(--warn); }
+.alert-bad .row { border-top-color: rgba(194,51,43,.25); }
+.late-txt { color: var(--bad) !important; font-weight: 600; }
 
 /* Bottom sheet */
 #scrim { position: fixed; inset: 0; background: rgba(0,0,0,.4); z-index: 9; touch-action: none; }

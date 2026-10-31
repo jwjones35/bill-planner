@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's available to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '1.5.5';
+const APP_VERSION = '1.5.6';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -387,7 +387,16 @@ function applyBank(j, now) {
 /* Checking as it really stands: the bank's balance, minus things entered in the app that the bank doesn't show yet
    (bill payments can take 3-5 business days; card purchases a day or two). Without a bank connection it's the
    balance kept up to date by hand. */
-const inTransitPays = () => S.payments.filter(p => p.inTransit && !p.txId && diffDays(p.paidOn, today()) <= 14);
+// Bill payments stay counted until the bank shows them or the user answers the "not at the bank yet" notice on Home.
+const inTransitPays = () => S.payments.filter(p => p.inTransit && !p.txId && !p.cleared && p.paidOn >= S.setupDate);
+// Bills past their due date and not marked paid.
+const pastDue = () => dueList(lookback(), today());
+// Business days (Mon-Fri) from one date to another, for "bill payments can take 3-5 business days".
+function bizDays(from, to) {
+  let n = 0;
+  for (let d = addDays(from, 1); d <= to; d = addDays(d, 1)) { const w = new Date(parseD(d)).getUTCDay(); if (w !== 0 && w !== 6) n++; }
+  return n;
+}
 const inTransitSpends = () => S.spending.filter(x => x.inTransit && !x.txId && diffDays(x.date, today()) <= 14);
 /* A balance typed in from the bank's own app (which is up to the minute) is used until the bank connection brings
    data newer than it. Items entered in the app after it, or ticked as "not in the bank's app yet", still subtract. */
@@ -664,6 +673,12 @@ function render() {
   $('#tabs').hidden = !S;
   if (!S) { v.innerHTML = viewWelcome(); return; }
   document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
+  // A red count on the Home tab (and on the app icon, where the phone allows it) while bills are past due.
+  const late = pastDue().length, homeBtn = document.querySelector('#tabs [data-tab=home]');
+  let badge = homeBtn && homeBtn.querySelector('.badge');
+  if (homeBtn && late && !badge) { badge = document.createElement('span'); badge.className = 'badge'; homeBtn.appendChild(badge); }
+  if (badge) { badge.hidden = !late; badge.textContent = late; badge.setAttribute('aria-label', `${late} past due`); }
+  try { if (navigator.setAppBadge) (late ? navigator.setAppBadge(late) : navigator.clearAppBadge()).catch(() => { }); } catch (x) { }
   v.innerHTML = tab === 'pay' ? viewPay() : tab === 'bills' ? viewBills() : tab === 'more' ? viewMore() : viewHome();
 }
 
@@ -679,7 +694,7 @@ function billRow(x) {
   const sub = (x.p ? `Paid ${nice(x.p.paidOn || x.d)}` : `${nice(x.d)} · ${rel(x.d)}`) + (x.b.fee ? ` · includes ${fm(x.b.fee)} fee` : '');
   return `<button class="row${x.p ? ' done' : ''}" data-act="pay" data-id="${x.b.id}" data-d="${x.d}">
     <span class="dot ${dot}"></span>
-    <span class="main"><div class="name">${esc(x.b.name)}</div><div class="sub">${sub}</div></span>
+    <span class="main"><div class="name">${esc(x.b.name)}</div><div class="sub${late ? ' late-txt' : ''}">${sub}</div></span>
     <span class="amt num">${amtHtml(x)}</span></button>`;
 }
 function section(title, list, emptyText, collapsed) {
@@ -689,6 +704,44 @@ function section(title, list, emptyText, collapsed) {
     return `<details class="card" style="margin-top:22px"><summary class="row"><span class="main"><div class="name">${title}</div><div class="sub">${list.length} bill${list.length === 1 ? '' : 's'}</div></span><span class="amt num">${fm(tot)}</span></summary>${rows}</details>`;
   }
   return `<h2>${title}<span class="tot num">${list.length ? fm(tot) : ''}</span></h2><div class="card">${rows}</div>`;
+}
+
+// A red alert near the top of Home for every bill past its due date. Tapping a bill opens it to mark it paid.
+function pastDueHtml() {
+  const list = pastDue();
+  if (!list.length) return '';
+  const tot = sum(list.map(x => x.amt));
+  return `<div class="card alert-bad" style="margin-top:12px">
+    <div class="pad" style="padding-bottom:6px"><b>${list.length === 1 ? 'A bill is past due' : `${list.length} bills are past due`}</b> <span class="num">(${fm(tot)})</span>
+      <div class="small" style="margin-top:2px">Pay ${list.length === 1 ? 'it' : 'them'} as soon as you can. Already paid? Tap the bill and mark it paid.</div></div>
+    ${list.map(x => `<button class="row" data-act="pay" data-id="${x.b.id}" data-d="${x.d}"><span class="dot late"></span>
+      <span class="main"><div class="name">${esc(x.b.name)}</div><div class="sub late-txt">Was due ${nice(x.d)} · ${rel(x.d)}</div></span>
+      <span class="amt num">${amtHtml(x)}</span></button>`).join('')}
+  </div>`;
+}
+/* Bill payments marked paid in the app that the bank doesn't show yet. Bill payments can take 3-5 business days,
+   so this is a gentle note at first and a red warning after 5 business days. */
+function notClearedHtml() {
+  if (!bankOn()) return '';
+  const list = inTransitPays().sort((a, b) => a.paidOn.localeCompare(b.paidOn));
+  if (!list.length) return '';
+  const t = today();
+  const slow = list.filter(p => bizDays(p.paidOn, t) > 5);
+  const bank = esc(bankName());
+  return `<div class="card ${slow.length ? 'alert-bad' : 'alert-warn'}" style="margin-top:12px">
+    <div class="pad" style="padding-bottom:6px"><b>${slow.length ? `Paid in the app, but still not showing at ${bank}` : `Paid in the app, not showing at ${bank} yet`}</b>
+      <div class="small" style="margin-top:2px">${slow.length
+        ? `Bill payments usually show within 3 to 5 business days. Check that ${slow.length === 1 ? 'this payment' : 'these payments'} went through. Until you answer, the app keeps counting ${list.length === 1 ? 'it' : 'them'} as money still going out.`
+        : `This is normal: bill payments can take 3 to 5 business days to show. Until then, the app counts ${list.length === 1 ? 'it' : 'them'} as money still going out.`}</div></div>
+    ${list.map(p => {
+      const b = findB(p.billId) || { name: 'Bill' }, n = diffDays(p.paidOn, t), late = bizDays(p.paidOn, t) > 5;
+      return `<div class="pad" style="border-top:1px solid var(--line)">
+        <div style="display:flex;justify-content:space-between;gap:10px"><b>${esc(b.name)}</b><span class="num" style="font-weight:600">${fm(p.amount)}</span></div>
+        <div class="small ${late ? 'late-txt' : 'muted'}">Marked paid ${nice(p.paidOn)}${n === 0 ? ' (today)' : n === 1 ? ' (yesterday)' : ` (${n} days ago)`}</div>
+        ${late ? `<div class="btns" style="margin-top:8px"><button class="btn small ghost" data-act="clearNo" data-id="${p.billId}" data-d="${p.due}">It didn't go through</button><button class="btn small" data-act="clearYes" data-id="${p.billId}" data-d="${p.due}">It went through</button></div>` : ''}
+      </div>`;
+    }).join('')}
+  </div>`;
 }
 
 function viewHome() {
@@ -756,6 +809,8 @@ function viewHome() {
       ${nw.short > 0 ? `<div class="nw-warn">Next week's pay is ${fm(nw.short)} less than next week's bills, so keep at least <b>${fm(nw.short)}</b> of today's money for them.</div>` : ''}
     </div>` : ''}
   </div>
+  ${pastDueHtml()}
+  ${notClearedHtml()}
   ${sugHtml}
   <div class="btns" style="margin-top:10px"><button class="btn" data-act="spend">+ Record spending (groceries, gas, other purchases)</button></div>`;
 
@@ -807,8 +862,7 @@ function viewHome() {
     </details>`;
   }
 
-  const overdue = dueList(lookback(), t);
-  if (overdue.length) h += section('Overdue bills', overdue, '');
+  // Past-due bills are listed in the red alert near the top.
   const wkEnd = addDays(t, 7);
   h += section('Bills due this week', dueList(t, wkEnd), 'No bills due in the next 7 days.');
   const fonm = firstOfNextMonth(t);
@@ -1414,6 +1468,17 @@ document.addEventListener('click', e => {
         S.payments = S.payments.filter(x => x !== p); save();
       }
       closeSheet(); render(); toast(`${b.name} marked not paid.`); break;
+    }
+    case 'clearYes': {
+      // The payment went through but wasn't matched to a bank transaction: the bank balance already includes it.
+      const b = findB(id), p = b && paidRec(b, d);
+      if (p) { p.cleared = true; p.inTransit = false; save(); }
+      render(); toast(`${b ? b.name : 'Bill'} payment marked as gone through.`); break;
+    }
+    case 'clearNo': {
+      const b = findB(id), p = b && paidRec(b, d);
+      if (p) { S.payments = S.payments.filter(x => x !== p); save(); }
+      render(); toast(`${b ? b.name : 'The bill'} is back on your list as not paid.`); break;
     }
     case 'bankConnect': sheetConnect(); break;
     case 'bankAccounts': if (S.bank.accounts.length) sheetAccounts(); else toast('Update from the bank first.'); break;
