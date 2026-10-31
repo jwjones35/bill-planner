@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's safe to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '1.0.3';
+const APP_VERSION = '1.0.4';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -299,7 +299,7 @@ function infoCard(info) {
 function viewPay() {
   const t = today();
   const { c, out, todayPays } = periods(8);
-  let h = `<h1>Paydays</h1>`;
+  let h = `<div class="toolbar"><h1>Paydays</h1><button class="btn small ghost" data-act="incomes">Edit paychecks</button></div>`;
   const missed = payList(addDays(t, -14) > S.setupDate ? addDays(t, -14) : S.setupDate, t);
   if (missed.length) {
     h += `<h2>Did these arrive?</h2><div class="card">` + missed.map(p => incRow(p)).join('') + `</div>`;
@@ -311,7 +311,7 @@ function viewPay() {
   h += `<div class="card pad" style="margin-top:14px"><div class="small muted">Now until ${c.hasPay ? nice(c.np) : 'payday'}</div><div class="num" style="font-size:22px;font-weight:700"><span class="${c.safe < 0 ? 'neg' : ''}">${fm(c.safe)}</span> <span class="small muted" style="font-weight:400">safe to spend${todayPays.length ? ', before today\'s pay' : ''}</span></div>
     ${c.everyday ? `<div class="small muted">Usual everyday spending until then: about ${fm(c.everyday)}. The forecast below allows for it.</div>` : ''}</div>`;
   if (!out.length) {
-    h += `<div class="banner warn">No paychecks set up yet. Add them under More › Income.</div>`;
+    h += `<div class="banner warn">No paychecks set up yet. <a href="#" data-act="editInc">Add a paycheck</a></div>`;
     return h;
   }
   for (const p of out) {
@@ -368,9 +368,6 @@ function viewMore() {
   <h2>Balances</h2><div class="card">
     <button class="row" data-act="balances"><span class="main"><div class="name">Checking</div><div class="sub">${bal.updated ? 'Updated ' + nice(bal.updated) : 'Not entered yet'}</div></span><span class="amt num">${fm(bal.checking)}</span></button>
     <button class="row" data-act="balances"><span class="main"><div class="name">Savings</div></span><span class="amt num">${fm(bal.savings)}</span></button></div>
-
-  <h2>Income</h2><div class="card">${S.incomes.map(i => `<button class="row" data-act="editInc" data-id="${i.id}"><span class="main"><div class="name">${esc(i.name)}${i.owner ? ` <span class="tag">${esc(i.owner)}</span>` : ''}${i.active === false ? ' <span class="tag">stopped</span>' : ''}</div><div class="sub">${freqText(i)}${i.varies ? ' · varies' : ''}</div></span><span class="amt num">${incAmt(i).est ? '~' : ''}${fm(incAmt(i).v)}</span></button>`).join('') || '<div class="empty">No paychecks yet.</div>'}
-    <div class="list-actions"><button class="btn small ghost" data-act="editInc">+ Add paycheck</button></div></div>
 
   <h2>Set aside</h2><div class="card">${S.setAsides.map(a => `<button class="row" data-act="editAside" data-id="${a.id}"><span class="main"><div class="name">${esc(a.name)}</div><div class="sub">Not counted as spendable</div></span><span class="amt num">${fm(a.amount)}</span></button>`).join('') || '<div class="empty">Money you are holding for something specific, like a repair.</div>'}
     <div class="list-actions"><button class="btn small ghost" data-act="editAside">+ Set money aside</button></div></div>
@@ -462,7 +459,8 @@ function sheetRecv(inc, d) {
     ${a.est ? `<p class="hint">This one varies. Enter the real amount so future estimates get better.</p>` : ''}
     <label class="check"><input type="checkbox" name="adjust" checked> Add it to my checking balance</label>
     <p class="hint">Untick this if you have already updated your balance since it arrived.</p>
-    <div class="btns">${cancelBtn}<button class="btn">Received</button></div></form>`);
+    <div class="btns">${cancelBtn}<button class="btn">Received</button></div>
+    <div class="btns"><button type="button" class="btn ghost" data-act="editInc" data-id="${inc.id}">Edit this paycheck</button></div></form>`);
 }
 function freqFields(x, prefix) {
   const f = x.freq || 'monthly';
@@ -497,6 +495,12 @@ function sheetBill(b) {
     <div class="btns">${cancelBtn}<button class="btn">Save</button></div>
     ${b ? `<div class="btns"><button type="button" class="btn danger" data-act="delBill" data-id="${b.id}">Delete bill</button></div>` : ''}
   </form>`);
+}
+// List of all paychecks, opened from the Paydays tab.
+function sheetIncomes() {
+  openSheet(`<h3>Paychecks</h3><p class="hint">Tap one to change its name, whose it is, schedule or usual amount.</p>
+    <div class="card" style="margin-top:10px">${S.incomes.map(i => `<button class="row" data-act="editInc" data-id="${i.id}"><span class="main"><div class="name">${esc(i.name)}${i.owner ? ` <span class="tag">${esc(i.owner)}</span>` : ''}${i.active === false ? ' <span class="tag">stopped</span>' : ''}</div><div class="sub">${freqText(i)}${i.varies ? ' · varies' : ''}</div></span><span class="amt num">${incAmt(i).est ? '~' : ''}${fm(incAmt(i).v)}</span></button>`).join('') || '<div class="empty">No paychecks yet.</div>'}</div>
+    <div class="btns"><button class="btn ghost" data-act="close">Done</button><button class="btn" data-act="editInc">+ Add paycheck</button></div>`);
 }
 function sheetInc(i) {
   const x = i || { freq: 'biweekly' };
@@ -682,6 +686,7 @@ document.addEventListener('click', e => {
     }
     case 'editBill': sheetBill(id ? findB(id) : null); break;
     case 'editInc': sheetInc(id ? findI(id) : null); break;
+    case 'incomes': sheetIncomes(); break;
     case 'editAside': sheetAside(id ? S.setAsides.find(a => a.id === id) : null); break;
     case 'editInfo': sheetInfo(id ? S.infos.find(a => a.id === id) : null); break;
     case 'balances': sheetBalances(); break;
