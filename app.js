@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's available to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '1.4.3';
+const APP_VERSION = '1.4.4';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -242,6 +242,17 @@ function bankAccess() { try { return localStorage.getItem(BANK_KEY) || ''; } cat
 function setBankAccess(v) { try { if (v) localStorage.setItem(BANK_KEY, v); else localStorage.removeItem(BANK_KEY); } catch (e) { } }
 const bankOn = () => !!(S && bankAccess() && S.bank.checkingId && S.bank.bal);
 const bankName = () => { const a = S.bank.accounts.find(x => x.id === S.bank.checkingId); return (a && a.org) || 'your bank'; };
+// "today 6:10 AM", "yesterday 9:42 PM", "Wed Oct 28 7:05 AM"
+function whenText(ms) {
+  const d = new Date(ms);
+  const day = d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+  const time = d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+  const diff = diffDays(day, today());
+  return (diff === 0 ? 'today' : diff === 1 ? 'yesterday' : nice(day)) + ' ' + time;
+}
+// How old the bank's own data is (falls back to when the app last checked).
+const bankAsOf = () => S.bank.bal && (S.bank.bal.asOf || S.bank.bal.at);
+const bankAgeText = () => `${esc(bankName())} balance as of ${whenText(bankAsOf())}`;
 function timeAgo(ms) {
   const m = Math.round((Date.now() - ms) / 60000);
   if (m < 1) return 'just now';
@@ -351,7 +362,9 @@ function applyBank(j, now) {
   S.bank.bal = {
     checking: cA ? (hasAvail ? cA.available : cA.balance + pendingSum) : null,
     savings: S.bank.savingsId ? pick(S.bank.savingsId) : null,
-    posted: cA ? cA.balance : null, available: hasAvail ? cA.available : null, pendingSum, at: now
+    posted: cA ? cA.balance : null, available: hasAvail ? cA.available : null, pendingSum, at: now,
+    // When the bank itself last reported this balance (SimpleFIN refreshes about once a day)
+    asOf: (() => { const r = raw.find(a => String(a.id) === S.bank.checkingId); const s = r && Number(r['balance-date']); return s ? s * 1000 : null; })()
   };
   runMatching();
 }
@@ -675,7 +688,8 @@ function viewHome() {
     <div class="big num ${c.safe < 0 ? 'neg' : ''}">${fm(c.safe)}</div>
     <div class="small muted">Checking minus the bills due before payday.${nw ? ' Next week is estimated below.' : ' Bills after payday are not included, so keep some back for next week.'}</div>
     ${bankOn()
-      ? `<div class="small muted" style="margin-top:4px">${bankBusy ? `Updating from ${esc(bankName())}...` : `Balance from ${esc(bankName())}, updated ${timeAgo(S.bank.bal.at)} · <a href="#" data-act="bankRefresh">Update now</a>`}</div>
+      ? `<div class="small muted" style="margin-top:4px">${bankBusy ? `Updating from ${esc(bankName())}...` : `${bankAgeText()} · <a href="#" data-act="bankRefresh">Check now</a>`}</div>
+         ${!bankBusy && Date.now() - bankAsOf() > 36 * HOUR ? `<div class="small" style="margin-top:4px;color:var(--warn)">The bank data is over a day old. Purchases since then may not be included yet.</div>` : ''}
          ${S.bank.error ? `<div class="small neg" style="margin-top:4px">${esc(S.bank.error)}</div>` : ''}`
       : `<div class="small muted" style="margin-top:4px">${stale} · <a href="#" data-act="balances">Update</a></div>`}
     ${c.everyday ? `<div class="small muted" style="margin-top:4px">Usual everyday spending until then: about ${fm(c.everyday)} <span class="tag">not subtracted</span></div>` : ''}
@@ -862,7 +876,7 @@ function viewMore() {
   let h = `<h1>More</h1>
   <h2>Bank connection</h2><div class="card">${bankAccess()
     ? `<div class="pad"><div><b>${bankOn() ? `Connected to ${esc(bankName())}` : 'Connected, waiting for the first update'}</b></div>
-        <div class="small muted">${bankBusy ? 'Updating now...' : S.bank.fetchedAt ? `Last updated ${timeAgo(S.bank.fetchedAt)}. Updates by itself about once an hour while the app is open.` : 'Not updated yet.'}</div>
+        <div class="small muted">${bankBusy ? 'Updating now...' : S.bank.fetchedAt ? `${S.bank.bal ? bankAgeText() + '. ' : ''}SimpleFIN gets new data from the bank about once a day; the app checks for it every hour while open (last checked ${timeAgo(S.bank.fetchedAt)}).` : 'Not updated yet.'}</div>
         ${S.bank.error ? `<div class="small neg" style="margin-top:4px">${esc(S.bank.error)}</div>` : ''}
         <div class="btns"><button class="btn small" data-act="bankRefresh">Update now</button><button class="btn small ghost" data-act="bankAccounts">Choose accounts</button></div>
         <div class="btns"><button class="btn small danger" data-act="bankDisconnect">Disconnect bank</button></div></div>`
@@ -871,7 +885,7 @@ function viewMore() {
         <p class="hint">Uses SimpleFIN Bridge (a paid service, about $15 a year). You sign in to your bank on SimpleFIN's website, never in this app.</p></div>`}</div>
 
   <h2>Balances</h2><div class="card">
-    <button class="row" data-act="balances"><span class="main"><div class="name">Checking</div><div class="sub">${bankOn() ? `From ${esc(bankName())}, updated ${timeAgo(S.bank.bal.at)}` : bal.updated ? 'Updated ' + nice(bal.updated) : 'Not entered yet'}</div></span><span class="amt num">${fm(checkingNow())}</span></button>
+    <button class="row" data-act="balances"><span class="main"><div class="name">Checking</div><div class="sub">${bankOn() ? bankAgeText() : bal.updated ? 'Updated ' + nice(bal.updated) : 'Not entered yet'}</div></span><span class="amt num">${fm(checkingNow())}</span></button>
     <button class="row" data-act="balances"><span class="main"><div class="name">Savings</div></span><span class="amt num">${fm(savingsNow())}</span></button></div>
 
   <h2>Set aside</h2><div class="card">${S.setAsides.map(a => `<button class="row" data-act="editAside" data-id="${a.id}"><span class="main"><div class="name">${esc(a.name)}</div><div class="sub">Not counted as spendable</div></span><span class="amt num">${fm(a.amount)}</span></button>`).join('') || '<div class="empty">Money you are holding for something specific, like a repair.</div>'}
@@ -1071,7 +1085,7 @@ function pendingItems() {
 // With a bank connected, balances come from the bank; this just explains them.
 function sheetBankBalances() {
   const pays = inTransitPays(), spends = inTransitSpends();
-  openSheet(`<h3>Balances</h3><p class="hint">These come from ${esc(bankName())} automatically, updated ${timeAgo(S.bank.bal.at)}.</p>
+  openSheet(`<h3>Balances</h3><p class="hint">These come from ${esc(bankName())} automatically: ${bankAgeText()}. SimpleFIN gets new data from the bank about once a day, and purchases can take a few days to appear, so anything big you spend today is worth adding with "Record spending".</p>
     <div class="breakdown num" style="font-size:15px">
       ${S.bank.bal.posted != null ? `<div class="muted"><span>Posted balance</span><span>${fm(S.bank.bal.posted)}</span></div>` : ''}
       <div class="muted"><span>Pending transactions</span><span>${S.bank.bal.pendingSum < 0 ? '−' : ''}${fm(Math.abs(S.bank.bal.pendingSum || 0))}</span></div>
