@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's available to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '1.7.1';
+const APP_VERSION = '1.8.0';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -437,8 +437,36 @@ function applyBank(j, now) {
 // Bill payments stay counted until the bank shows them or the user answers the "not at the bank yet" notice on Home.
 // (Only payments marked paid while a bank is connected get inTransit, so no date limit is needed.)
 const inTransitPays = () => S.payments.filter(p => p.inTransit && !p.txId && !p.cleared);
-// Bills past their due date and not marked paid.
-const pastDue = () => dueList(lookback(), today());
+// Bills past their due date and not marked paid (autopay bills are handled separately below).
+const pastDue = () => dueList(lookback(), today()).filter(x => !x.b.autopay);
+/* Autopay: the company takes the money itself, and the bank can show it a day or more after the due date.
+   For 3 business days after the due date the app just waits. After that it warns, and the user can say
+   "keep waiting" (no more warnings until it shows) or "remind me in X days". S.autopayWait holds those answers:
+   'billId|due' -> 'wait' or the date to remind again. */
+const AUTOPAY_GRACE = 3;
+const apKey = x => x.b.id + '|' + x.d;
+function autopayStatus(x) {
+  const w = (S.autopayWait || {})[apKey(x)];
+  if (w === 'wait') return 'waiting';
+  if (w) return today() < w ? 'snoozed' : 'late';
+  return bizDays(x.d, today()) <= AUTOPAY_GRACE ? 'waiting' : 'late';
+}
+const autopayDue = () => dueList(lookback(), today()).filter(x => x.b.autopay);
+const autopayLate = () => autopayDue().filter(x => autopayStatus(x) === 'late');
+/* Without a bank connection nothing can show the charge, so an autopay bill is marked paid on its due date
+   (and taken off the checking balance, like marking a bill paid by hand). */
+function autopayNoBank() {
+  if (!S || bankOn()) return false;
+  let n = 0;
+  for (const x of dueList(lookback(), addDays(today(), 1))) {
+    if (!x.b.autopay || x.unknown) continue;
+    const a = billAmt(x.b);
+    S.payments.push({ billId: x.b.id, due: x.d, paidOn: x.d, amount: a.v, fee: a.fee, adjusted: true, autopay: true });
+    S.balances.checking = (S.balances.checking || 0) - a.v; n++;
+  }
+  if (n) save();
+  return n > 0;
+}
 // Business days (Mon-Fri) from one date to another, for "bill payments can take 3-5 business days".
 function bizDays(from, to) {
   let n = 0;
@@ -769,8 +797,9 @@ function render() {
   $('#tabs').hidden = !S;
   if (!S) { v.innerHTML = viewWelcome(); return; }
   document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
+  autopayNoBank();
   // A red count on the Home tab (and on the app icon, where the phone allows it) while bills are past due.
-  const late = pastDue().length, homeBtn = document.querySelector('#tabs [data-tab=home]');
+  const late = pastDue().length + autopayLate().length, homeBtn = document.querySelector('#tabs [data-tab=home]');
   let badge = homeBtn && homeBtn.querySelector('.badge');
   if (homeBtn && late && !badge) { badge = document.createElement('span'); badge.className = 'badge'; homeBtn.appendChild(badge); }
   if (badge) { badge.hidden = !late; badge.textContent = late; badge.setAttribute('aria-label', `${late} past due`); }
@@ -784,13 +813,15 @@ function amtHtml(x) {
 }
 function billRow(x) {
   const t = today();
-  const late = !x.p && x.d < t;
-  const soon = !x.p && !late && diffDays(t, x.d) <= 3;
+  // An autopay bill after its due date is only "late" once the app has warned about it.
+  const apWaiting = !x.p && x.b.autopay && x.d < t && autopayStatus(x) !== 'late';
+  const late = !x.p && x.d < t && !apWaiting;
+  const soon = !x.p && !late && (apWaiting || diffDays(t, x.d) <= 3);
   const dot = x.p ? 'paid' : late ? 'late' : soon ? 'soon' : 'ok';
-  const sub = (x.p ? `Paid ${nice(x.p.paidOn || x.d)}` : `${nice(x.d)} · ${rel(x.d)}`) + (x.b.fee ? ` · includes ${fm(x.b.fee)} fee` : '');
+  const sub = (x.p ? `Paid ${nice(x.p.paidOn || x.d)}` : apWaiting ? `${nice(x.d)} · autopay, waiting for the bank` : `${nice(x.d)} · ${rel(x.d)}`) + (x.b.fee ? ` · includes ${fm(x.b.fee)} fee` : '');
   return `<button class="row${x.p ? ' done' : ''}" data-act="pay" data-id="${x.b.id}" data-d="${x.d}">
     <span class="dot ${dot}"></span>
-    <span class="main"><div class="name">${esc(x.b.name)}</div><div class="sub${late ? ' late-txt' : ''}">${sub}</div></span>
+    <span class="main"><div class="name">${esc(x.b.name)}${x.b.autopay ? ' <span class="tag">autopay</span>' : ''}</div><div class="sub${late ? ' late-txt' : ''}">${sub}</div></span>
     <span class="amt num">${amtHtml(x)}</span></button>`;
 }
 function section(title, list, emptyText, collapsed) {
@@ -824,6 +855,33 @@ function chargeChoices(p) {
   const named = t => b && (learned(b, t.desc) || guessed(b, t.desc)) ? 0 : 1;
   return S.bank.tx.filter(t => t.amount < 0 && !used.has(t.id) && t.date >= from && t.date <= to)
     .sort((a, c) => named(a) - named(c) || Math.abs(-a.amount - base) - Math.abs(-c.amount - base)).slice(0, 6);
+}
+/* Autopay bills after their due date: a warning for ones the bank still doesn't show after 3 business days
+   (with "remind me in X days" and "keep waiting"), and a quiet list of ones the app is waiting on. */
+function autopayHtml() {
+  const all = autopayDue();
+  if (!all.length) return '';
+  const late = all.filter(x => autopayStatus(x) === 'late'), waiting = all.filter(x => autopayStatus(x) !== 'late');
+  const bank = bankOn() ? esc(bankName()) : 'the bank';
+  let h = '';
+  if (late.length) h += `<div class="card alert-bad" style="margin-top:12px">
+    <div class="pad" style="padding-bottom:6px"><b>${late.length === 1 ? 'An autopay bill may not have gone through' : `${late.length} autopay bills may not have gone through`}</b>
+      <div class="small" style="margin-top:2px">The charge isn't showing at ${bank} yet. Check the company's website or your bank's app. It's still counted as money going out.</div></div>
+    ${late.map(x => `<div class="pad" style="border-top:1px solid var(--line)">
+      <div style="display:flex;justify-content:space-between;gap:10px"><b>${esc(x.b.name)}</b><span class="num" style="font-weight:600">${amtHtml(x)}</span></div>
+      <div class="small late-txt">Autopay was due ${nice(x.d)} · ${rel(x.d)}</div>
+      <div class="ap-remind"><label for="ap${x.b.id}${x.d}">Remind me again in</label>
+        <input id="ap${x.b.id}${x.d}" data-ap-days="${x.b.id}|${x.d}" type="number" inputmode="numeric" min="1" max="60" value="3"><span>days</span>
+        <button class="btn small" data-act="apRemind" data-id="${x.b.id}" data-d="${x.d}">Remind me</button></div>
+      <div class="btns" style="margin-top:8px"><button class="btn small ghost" data-act="apWait" data-id="${x.b.id}" data-d="${x.d}">Keep waiting</button><button class="btn small ghost" data-act="pay" data-id="${x.b.id}" data-d="${x.d}">It's paid / pay it myself</button></div>
+    </div>`).join('')}</div>`;
+  if (waiting.length) h += `<div class="card" style="margin-top:12px">
+    <div class="pad" style="padding-bottom:4px"><b>Autopay · waiting for ${bank}</b>
+      <div class="small muted" style="margin-top:2px">Due already; the company takes it by itself. Still counted as money going out until ${bank} shows it.</div></div>
+    ${waiting.map(x => { const w = (S.autopayWait || {})[apKey(x)]; return `<button class="row" data-act="pay" data-id="${x.b.id}" data-d="${x.d}"><span class="dot soon"></span>
+      <span class="main"><div class="name">${esc(x.b.name)}</div><div class="sub">Due ${nice(x.d)}${w === 'wait' ? ' · you chose to keep waiting' : w ? ` · reminder on ${nice(w)}` : ''}</div></span>
+      <span class="amt num">${amtHtml(x)}</span></button>`; }).join('')}</div>`;
+  return h;
 }
 /* Bill payments marked paid in the app that the bank doesn't show yet. Bill payments can take 3-5 business days,
    so this is a gentle note at first and a red warning after 5 business days. */
@@ -921,6 +979,7 @@ function viewHome() {
     </div>` : ''}
   </div>
   ${pastDueHtml()}
+  ${autopayHtml()}
   ${notClearedHtml()}
   ${sugHtml}
   <div class="btns" style="margin-top:10px"><button class="btn" data-act="spend">+ Record spending (groceries, gas, other purchases)</button></div>`;
@@ -1067,7 +1126,7 @@ function viewBills() {
     const a = billAmt(b);
     return `<button class="row" data-act="editBill" data-id="${b.id}">
       <span class="dot ${b.active === false ? '' : done ? 'paid' : 'ok'}"></span>
-      <span class="main"><div class="name">${esc(b.name)}${b.varies ? ' <span class="tag">varies</span>' : ''}${b.active === false ? ' <span class="tag">stopped</span>' : ''}${done ? ' <span class="tag">paid</span>' : ''}</div>
+      <span class="main"><div class="name">${esc(b.name)}${b.autopay ? ' <span class="tag">autopay</span>' : ''}${b.varies ? ' <span class="tag">varies</span>' : ''}${b.active === false ? ' <span class="tag">stopped</span>' : ''}${done ? ' <span class="tag">paid</span>' : ''}</div>
       <div class="sub">${freqText(b)}${next && b.freq !== 'once' ? ' · next ' + nice(next.d) : ''}${done ? ` · paid ${nice(done.paidOn || done.due)}` : ''}</div></span>
       <span class="amt num">${a.unknown ? '<span class="tag warn">amount?</span>' : (a.est ? '~' : '') + fm(a.v)}</span></button>`;
   }).join('') : `<div class="empty">No bills yet. Tap + Add.</div>`;
@@ -1307,6 +1366,8 @@ function sheetBill(b, draft) {
     <label for="bFee">Transaction fee charged with it</label><input id="bFee" name="fee" inputmode="decimal" value="${money2(x.fee)}" placeholder="Optional, for example 2.25">
     <p class="hint">A small extra charge that comes with this bill on the same day. It's added to the bill's total.</p>
     <label class="check"><input type="checkbox" name="varies"${x.varies ? ' checked' : ''}> The amount changes (like electric or water)</label>
+    <label class="check"><input type="checkbox" name="autopay"${x.autopay ? ' checked' : ''}> Paid automatically (autopay)</label>
+    <p class="hint">The company takes the money by itself. After the due date, the app waits for the charge to show at the bank instead of calling the bill past due, and warns you if it still hasn't come out after 3 business days.</p>
     <label for="bMatch">How the bank shows it</label><input id="bMatch" name="match" value="${esc((x.match || []).join(', '))}" autocapitalize="characters" placeholder="Filled in when you confirm a bank payment">
     <p class="hint">Words from the bank's description used to recognize this bill, for example TOWN MULDROW. Only used for matching; the name above is what you see. Separate several with commas.</p>
     <label class="check"><input type="checkbox" name="active"${x.active === false ? '' : ' checked'}> Still paying this</label>
@@ -1559,7 +1620,7 @@ function buildIcs() {
     else if (b.freq === 'once') rule = null;
     else rule = 'FREQ=YEARLY';
     const a = billAmt(b);
-    const title = `Bill due: ${b.name}${a.unknown ? '' : ` ${a.est ? '~' : ''}${fm(a.v)}`}`;
+    const title = `Bill due: ${b.name}${a.unknown ? '' : ` ${a.est ? '~' : ''}${fm(a.v)}`}${b.autopay ? ' (autopay)' : ''}`;
     L.push('BEGIN:VEVENT', `UID:${b.id}@billplanner`, `DTSTAMP:${stamp}`,
       `DTSTART;VALUE=DATE:${first.replace(/-/g, '')}`, `DTEND;VALUE=DATE:${addDays(first, 1).replace(/-/g, '')}`,
       ...(rule ? [`RRULE:${rule}`] : []), `SUMMARY:${icsEsc(title)}`, 'TRANSP:TRANSPARENT',
@@ -1695,6 +1756,17 @@ document.addEventListener('click', e => {
       if (a) a.seen = true;
       save(); render(); break;
     }
+    case 'apRemind': {
+      const inp = document.querySelector(`input[data-ap-days="${id}|${d}"]`);
+      const n = Math.round(Number(inp && inp.value));
+      if (!(n >= 1 && n <= 60)) { toast('Type a number of days from 1 to 60.'); break; }
+      S.autopayWait = Object.assign({}, S.autopayWait, { [id + '|' + d]: addDays(today(), n) });
+      save(); render(); toast(`OK. If it still hasn't come out, you'll be reminded on ${nice(addDays(today(), n))}.`); break;
+    }
+    case 'apWait': {
+      S.autopayWait = Object.assign({}, S.autopayWait, { [id + '|' + d]: 'wait' });
+      save(); render(); toast("OK. No more warnings for this one; it's still counted until the bank shows it."); break;
+    }
     case 'profile': sheetProfile(false); break;
     case 'profilePick': {
       const f = document.getElementById('fProfile'); if (!f) break;
@@ -1818,7 +1890,7 @@ document.addEventListener('submit', e => {
         }
       }
       const match = String(fd.get('match') || '').split(',').map(normText).filter(Boolean);
-      const o = Object.assign({ name: fd.get('name').trim(), amount: num(fd.get('amount')), fee: num(fd.get('fee')) || 0, match, varies: fd.get('varies') === 'on', active: fd.get('active') === 'on', note: fd.get('note').trim() }, fr);
+      const o = Object.assign({ name: fd.get('name').trim(), amount: num(fd.get('amount')), fee: num(fd.get('fee')) || 0, match, varies: fd.get('varies') === 'on', autopay: fd.get('autopay') === 'on', active: fd.get('active') === 'on', note: fd.get('note').trim() }, fr);
       let bill;
       const tx = f.dataset.tx && S.bank.tx.find(t => t.id === f.dataset.tx);
       if (id) {

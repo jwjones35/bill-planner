@@ -186,6 +186,10 @@ input[type=checkbox] { width: 22px; min-height: 22px; height: 22px; margin: 0; a
 .alert-warn > .pad:first-child b { color: var(--warn); }
 .alert-bad .row { border-top-color: rgba(194,51,43,.25); }
 .late-txt { color: var(--bad) !important; font-weight: 600; }
+/* "Remind me again in [3] days [Remind me]" on an autopay warning */
+.ap-remind { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; font-size: 14px; }
+.ap-remind label { margin: 0; color: var(--text); font-size: 14px; }
+.ap-remind input { width: 64px; min-height: 36px; padding: 6px 8px; text-align: center; }
 
 /* Bottom sheet */
 #scrim { position: fixed; inset: 0; background: rgba(0,0,0,.4); z-index: 9; touch-action: none; }
