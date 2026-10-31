@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's safe to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.0.1';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -412,6 +412,7 @@ function openSheet(html) {
   const sh = $('#sheet');
   sh.innerHTML = html;
   sh.hidden = false; $('#scrim').hidden = false;
+  sh.querySelectorAll('input[inputmode=decimal]:not([placeholder])').forEach(i => { i.placeholder = '0.00'; });
   const f = sh.querySelector('input:not([type=checkbox]):not([type=hidden]), select');
   if (f && !('ontouchstart' in window)) f.focus();
 }
@@ -422,7 +423,8 @@ function toast(msg) {
   clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.hidden = true; }, 2600);
 }
 const cancelBtn = `<button type="button" class="btn ghost" data-act="close">Cancel</button>`;
-const money2 = v => (v == null ? '' : (Math.round(v * 100) / 100).toFixed(2));
+// Amount boxes start empty instead of "0.00", so there's nothing to delete before typing.
+const money2 = v => (v == null || Number(v) === 0 ? '' : (Math.round(v * 100) / 100).toFixed(2));
 
 function sheetPay(b, d) {
   const p = paidRec(b, d);
@@ -775,6 +777,13 @@ document.addEventListener('submit', e => {
   }
 });
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet(); });
+// Tapping an amount box selects what's in it, so typing replaces it.
+document.addEventListener('focusin', e => {
+  const el = e.target;
+  if (el.tagName === 'INPUT' && el.inputMode === 'decimal' && el.value) {
+    setTimeout(() => { try { el.setSelectionRange(0, el.value.length); } catch (x) { el.select(); } }, 0);
+  }
+});
 
 // Re-draw when the app comes back to the front (the date may have changed).
 document.addEventListener('visibilitychange', () => { if (!document.hidden) render(); });

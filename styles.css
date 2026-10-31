@@ -129,7 +129,7 @@ button.card.row { border-top: 0; }
   display: inline-flex; align-items: center; justify-content: center;
   min-height: 44px; padding: 0 16px; border-radius: 12px; border: 0;
   background: var(--brand); color: var(--brand-ink);
-  font: 600 16px/1 inherit; font-family: inherit; cursor: pointer;
+  font-family: inherit; font-size: 16px; font-weight: 600; line-height: 1; cursor: pointer;
 }
 .btn.ghost { background: var(--chip); color: var(--text); }
 .btn.danger { background: var(--bad-bg); color: var(--bad); }
@@ -144,7 +144,8 @@ input, select, textarea {
   width: 100%; min-height: 44px; padding: 10px 12px;
   border: 1px solid var(--line); border-radius: 10px;
   background: var(--bg); color: var(--text);
-  font: 16px/1.3 inherit; font-family: inherit;
+  /* 16px or larger stops iPhone from zooming in when a box is tapped */
+  font-family: inherit; font-size: 16px; line-height: 1.3;
 }
 input[type=checkbox] { width: 22px; min-height: 22px; height: 22px; margin: 0; accent-color: var(--brand); flex: none; }
 .check { display: flex; gap: 10px; align-items: center; color: var(--text); font-size: 15px; margin: 14px 0 0; }
@@ -161,7 +162,7 @@ input[type=checkbox] { width: 22px; min-height: 22px; height: 22px; margin: 0; a
 #tabs button {
   flex: 1; display: flex; flex-direction: column; align-items: center; gap: 2px;
   padding: 8px 0 6px; background: none; border: 0; color: var(--muted);
-  font: 600 11px/1 inherit; font-family: inherit; cursor: pointer;
+  font-family: inherit; font-size: 11px; font-weight: 600; line-height: 1; cursor: pointer;
 }
 #tabs button .ti { font-size: 22px; line-height: 24px; font-weight: 400; }
 #tabs button.on { color: var(--brand); }
