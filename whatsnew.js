@@ -4,6 +4,12 @@
    Every release adds an entry here, in plain words: added, changed, fixed, removed. */
 const CHANGELOG = [
   {
+    v: '2.2.2', date: '2026-10-31',
+    added: ['Streaming bills (Netflix, Disney+, Hulu, Spotify and the like) now count toward the weekly entertainment limit. They\'re still bills for "Available to spend".',
+      'Each bill has a "Counts as entertainment" switch. Amazon Prime is off, since it\'s mostly used for household shopping.',
+      'Anything from Blizzard (Battle.net, World of Warcraft, Activision) counts as entertainment.']
+  },
+  {
     v: '2.2.1', date: '2026-10-31',
     added: ['Settings can be prepared for you and picked up by the app automatically, such as your two vehicles with their miles a day worked out from your usual drives.']
   },
