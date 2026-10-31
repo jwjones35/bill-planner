@@ -10,3 +10,6 @@ Thumbs.db
 desktop.ini
 *.tmp
 *.log
+
+# Local test simulator (fake data only)
+_sim/

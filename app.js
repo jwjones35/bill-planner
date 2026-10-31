@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's available to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '1.5.8';
+const APP_VERSION = '1.6.0';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -110,8 +110,15 @@ function occ(item, from, to) {
     // A one-time bill happens only on its date; once paid it drops off by itself.
     if (item.anchor && item.anchor >= from && item.anchor < to) out.push(item.anchor);
   }
-  if (item.endDate) return out.filter(d => d <= item.endDate);
-  return out;
+  // since: a bill added (or rescheduled) part way through only counts from then, so it has no made-up past-due dates.
+  const s = item.freq === 'once' ? null : item.since;
+  let res = (item.endDate || s) ? out.filter(d => (!item.endDate || d <= item.endDate) && (!s || d >= s)) : out;
+  // prev: the schedule before it was changed, which still holds for dates up to the change (one may still be unpaid).
+  if (item.prev && from <= item.prev.until) {
+    const old = occ(Object.assign({}, item.prev, { active: item.active }), from, to < addDays(item.prev.until, 1) ? to : addDays(item.prev.until, 1));
+    res = [...new Set([...old, ...res])].sort();
+  }
+  return res;
 }
 
 const paidRec = (b, d) => S.payments.find(p => p.billId === b.id && p.due === d);
@@ -165,8 +172,10 @@ function payList(from, to, unreceivedOnly = true) {
   }
   return out.sort((x, y) => x.d.localeCompare(y.d) || x.inc.name.localeCompare(y.inc.name));
 }
-// Missed bills are only looked for since the app was set up (and at most 60 days back).
-const lookback = () => { const t = addDays(today(), -60); return t > S.setupDate ? t : S.setupDate; };
+// Missed bills are only looked for since the app was set up.
+// Missed bills stay on the list until they are paid (they used to drop off after 60 days, hiding real debts).
+// A one-year limit only keeps very old leftovers from piling up.
+const lookback = () => { const t = addDays(today(), -365); return t > S.setupDate ? t : S.setupDate; };
 // The next payday AFTER today. A paycheck due today only counts once you confirm it arrived.
 function nextPayday() { const l = payList(addDays(today(), 1), addDays(today(), 45)); return l.length ? l[0].d : null; }
 
@@ -284,7 +293,8 @@ const hasWord = (desc, w) => (' ' + desc + ' ').includes(' ' + w + ' ');
 // Bank wording that says nothing about who was paid
 const BANKWORDS = new Set(['ONLINE', 'PMT', 'PYMT', 'PYMNT', 'PYMNTS', 'PAYMENT', 'PAYMENTS', 'PAY', 'ACH', 'DEBIT', 'CREDIT', 'POS', 'PURCHASE', 'PUR',
   'DDA', 'PIN', 'RECUR', 'RECURRING', 'CARD', 'CHECKCARD', 'CD', 'WEB', 'TRANSFER', 'XFER', 'BILLPAY', 'BILL', 'AUTOPAY', 'AUTO', 'ELECTRONIC',
-  'WITHDRAWAL', 'W', 'D', 'DIR', 'DEP', 'DEPOSIT', 'PPD', 'ID', 'CO', 'INC', 'LLC', 'THE', 'OF', 'AND', 'REF', 'EDI', 'WEBPAY', 'MOBILE', 'VISA', 'MC']);
+  'WITHDRAWAL', 'W', 'D', 'DIR', 'DEP', 'DEPOSIT', 'PPD', 'ID', 'CO', 'INC', 'LLC', 'THE', 'OF', 'AND', 'REF', 'EDI', 'WEBPAY', 'MOBILE', 'VISA', 'MC',
+  'ZELLE', 'TO', 'FROM', 'SENT', 'SEND']);
 // A remembered match is a set of words that must all appear in the bank description, in any order.
 const learned = (item, desc) => (item.match || []).some(p => p && p.split(' ').every(w => hasWord(desc, w)));
 const guessed = (item, desc) => nameWords(item.name).some(w => hasWord(desc, w));
@@ -367,7 +377,8 @@ function applyBank(j, now) {
   const ch = raw.find(a => String(a.id) === S.bank.checkingId);
   S.bank.tx = ((ch && ch.transactions) || []).map(t => ({
     id: String(t.id),
-    date: t.posted ? localDate(t.posted) : t.transacted_at ? localDate(t.transacted_at) : today(),
+    // The day it happened (a purchase or payment can take a day or more to post).
+    date: t.transacted_at ? localDate(t.transacted_at) : t.posted ? localDate(t.posted) : today(),
     amount: parseFloat(t.amount),
     desc: normText(t.description || t.payee || t.memo),
     pending: !!t.pending || !t.posted
@@ -433,18 +444,54 @@ function runMatching() {
   const free = t => !used.has(t.id) && !ignore.has(t.id);
   const suggest = [];
   const auto = [];
+  // 0. Banks often give a transaction a new id when it changes from pending to posted. Follow it to the new id,
+  //    so the posted copy isn't counted a second time (for example as next week's payment).
+  const ids = new Set(S.bank.tx.map(t => t.id));
+  const relink = (rec, field, amount, near) => {
+    if (!rec[field] || ids.has(rec[field]) || !near || diffDays(near, today()) > 20) return;
+    const t = S.bank.tx.filter(t => free(t) && Math.abs(t.amount - amount) < 0.01 && Math.abs(diffDays(t.date, near)) <= 4)
+      .sort((a, b) => Math.abs(diffDays(a.date, near)) - Math.abs(diffDays(b.date, near)))[0];
+    if (t) { used.delete(rec[field]); rec[field] = t.id; used.add(t.id); if (field === 'txId') rec.txDate = t.date; }
+  };
+  for (const p of S.payments) {
+    relink(p, 'txId', -(p.amount - (p.feeTxId ? p.fee || 0 : 0)), p.txDate || p.paidOn);
+    if (p.feeTxId) relink(p, 'feeTxId', -(p.fee || 0), p.txDate || p.paidOn);
+  }
+  for (const r of S.receipts) relink(r, 'txId', r.amount, r.txDate || r.date);
+  for (const x of S.spending) relink(x, 'txId', -x.amount, x.date);
   // 1. Link things entered in the app to the bank transaction once it shows up.
-  for (const p of S.payments.filter(p => p.inTransit && !p.txId)) {
-    const near = t => free(t) && t.amount < 0 && t.date >= addDays(p.paidOn, -3) && t.date <= addDays(p.paidOn, 10);
+  // Oldest payment first, each taking the charge closest to its date, so two same-amount payments don't swap charges.
+  const byDate = p => (a, c) => Math.abs(diffDays(a.date, p.paidOn)) - Math.abs(diffDays(c.date, p.paidOn));
+  for (const p of S.payments.filter(p => p.inTransit && !p.txId).sort((a, c) => a.paidOn.localeCompare(c.paidOn))) {
+    // (A bill ticked as "already taken" on the typed-in balance may have been charged on its due date, before today.)
+    const near = t => free(t) && t.amount < 0 && t.date >= addDays(p.takenFrom || p.paidOn, -3) && t.date <= addDays(p.paidOn, 16);
     // The bank may show it as one charge, or as the bill plus a separate fee charge.
-    let t = S.bank.tx.find(t => near(t) && Math.abs(-t.amount - p.amount) < 0.01);
-    if (t) { p.txId = t.id; used.add(t.id); continue; }
+    const b = findB(p.billId);
+    // Once linked, remember how the bank words this bill, so its next payments are recognized by themselves.
+    const learn = t => { p.txDate = t.date; if (b && !learned(b, t.desc)) b.match = [...new Set([...(b.match || []), phraseOf(t.desc)])]; };
+    let t = S.bank.tx.filter(t => near(t) && Math.abs(-t.amount - p.amount) < 0.01).sort(byDate(p))[0];
+    if (t) { p.txId = t.id; used.add(t.id); learn(t); continue; }
     if (p.fee) {
-      t = S.bank.tx.find(t => near(t) && Math.abs(-t.amount - (p.amount - p.fee)) < 0.01);
+      t = S.bank.tx.filter(t => near(t) && Math.abs(-t.amount - (p.amount - p.fee)) < 0.01).sort(byDate(p))[0];
       if (t) {
-        p.txId = t.id; used.add(t.id);
+        p.txId = t.id; used.add(t.id); learn(t);
         const fx = S.bank.tx.find(x => near(x) && x.id !== t.id && Math.abs(-x.amount - p.fee) <= 0.5 && Math.abs(diffDays(x.date, t.date)) <= 2);
-        if (fx) { p.feeTxId = fx.id; used.add(fx.id); p.amount = p.amount - p.fee + -fx.amount; p.fee = -fx.amount; feeCheck(findB(p.billId), p); }
+        if (fx) { p.feeTxId = fx.id; used.add(fx.id); p.amount = p.amount - p.fee + -fx.amount; p.fee = -fx.amount; feeCheck(b, p); }
+        continue;
+      }
+    }
+    // The bank took a different amount than was entered (a late fee, a rounding, a typo): accept a charge that carries
+    // this bill's name, within $10 or 20%, and use the bank's amount.
+    if (b) {
+      const base = p.amount - (p.fee || 0);
+      // (A bill whose amount changes, already recognized by its bank wording, can be much higher or lower.)
+      const close = t => Math.abs(-t.amount - base) <= Math.max(10, base * 0.2) || (b.varies && learned(b, t.desc) && -t.amount >= base * 0.3 && -t.amount <= base * 3.5 + 20);
+      t = S.bank.tx.filter(t => near(t) && (learned(b, t.desc) || guessed(b, t.desc)) && close(t))
+        .sort((x, y) => Math.abs(-x.amount - base) - Math.abs(-y.amount - base))[0];      if (t) {
+        p.txId = t.id; used.add(t.id); learn(t);
+        p.amount = -t.amount + (p.fee || 0);
+        const fx = p.fee && S.bank.tx.find(x => near(x) && x.id !== t.id && Math.abs(-x.amount - p.fee) <= 0.5 && Math.abs(diffDays(x.date, t.date)) <= 2);
+        if (fx) { p.feeTxId = fx.id; used.add(fx.id); p.amount = -t.amount + -fx.amount; p.fee = -fx.amount; feeCheck(b, p); }
       }
     }
   }
@@ -463,7 +510,8 @@ function runMatching() {
     const b = findB(p.billId), t = S.bank.tx.find(x => x.id === p.txId);
     if (!b || !b.fee || !t) continue;
     const f = feeTxFor(t, b.fee);
-    if (f) { p.feeTxId = f.id; p.fee = -f.amount; p.amount += -f.amount; used.add(f.id); feeCheck(b, p); }
+    // (A payment entered in the app may already include the expected fee: swap it for the real one.)
+    if (f) { p.amount = p.amount - (p.fee || 0) + -f.amount; p.feeTxId = f.id; p.fee = -f.amount; used.add(f.id); feeCheck(b, p); }
   }
   // 2. Money out: bill payments. Bigger charges first, so a small fee isn't taken for the bill itself.
   for (const t of S.bank.tx.filter(t => t.amount < 0 && t.date >= addDays(S.setupDate, -3)).sort((a, b) => a.amount - b.amount)) {
@@ -478,9 +526,13 @@ function runMatching() {
         // Compare with the bill alone: its fee arrives as a separate charge.
         const diff = e.unknown ? null : Math.abs(amt - e.base);
         const amtOk = e.unknown ? false : b.varies ? diff <= Math.max(5, e.base * 0.6) : diff <= 0.5;
+        // When the bank wording already identifies the bill, allow bigger changes: seasonal bills (gas, electric) can
+        // be three times their usual amount, and fixed bills sometimes raise their price.
+        const amtNear = e.unknown || (b.varies ? amt >= e.base * 0.3 && amt <= e.base * 3.5 + 20 : diff <= Math.max(10, e.base * 0.25));
         let c = null;
-        if (learned(b, t.desc) && (amtOk || e.unknown)) c = { auto: true };
-        else if ((guessed(b, t.desc) && (amtOk || e.unknown)) || (!b.varies && !e.unknown && diff < 0.01)) c = { auto: false };
+        if (learned(b, t.desc) && (amtOk || amtNear)) c = { auto: true, newPrice: !b.varies && !e.unknown && diff > 0.5 };
+        // (Same amount alone is only a clue while the bill's bank wording is still unknown.)
+        else if ((guessed(b, t.desc) && (amtOk || amtNear)) || (!b.varies && !e.unknown && diff < 0.01 && !(b.match || []).length)) c = { auto: false };
         if (!c) continue;
         c = Object.assign(c, { b, d, diff: diff == null ? 999 : diff, gap: Math.abs(diffDays(d, t.date)) });
         if (!best || (c.auto && !best.auto) || (c.auto === best.auto && (c.diff < best.diff || (c.diff === best.diff && c.gap < best.gap)))) best = c;
@@ -493,6 +545,11 @@ function runMatching() {
     if (best.auto) {
       const pay = { billId: best.b.id, due: best.d, paidOn: t.date, amount: amt, txId: t.id, auto: true };
       if (f) { pay.fee = -f.amount; pay.amount += -f.amount; pay.feeTxId = f.id; used.add(f.id); feeCheck(best.b, pay); if (!best.b.fee) best.b.fee = -f.amount; }
+      // A fixed bill charged a new price: update the bill and say so on Home.
+      if (best.newPrice) {
+        S.bank.priceAlerts = (S.bank.priceAlerts || []).filter(a => a.billId !== best.b.id).concat([{ billId: best.b.id, date: t.date, was: best.b.amount, now: amt }]).slice(-20);
+        best.b.amount = Math.round(amt * 100) / 100;
+      }
       S.payments.push(pay);
       used.add(t.id); auto.push(best.b.name);
     } else {
@@ -502,7 +559,9 @@ function runMatching() {
   }
   // 2b. Two same-day charges from the same place, one small, with no bill expecting a fee: ask whether to combine.
   const noPair = new Set(S.bank.noFeePairs || []);
-  for (const t of S.bank.tx.filter(t => t.amount < 0 && t.date >= addDays(S.setupDate, -3))) {
+  // Only for bill payments: two purchases at the same store on the same day are just two purchases.
+  const billTxIds = new Set([...S.payments.map(p => p.txId), ...suggest.filter(s => s.kind === 'bill').map(s => s.txId)].filter(Boolean));
+  for (const t of S.bank.tx.filter(t => t.amount < 0 && t.date >= addDays(S.setupDate, -3) && billTxIds.has(t.id))) {
     const f = feeTxFor(t, 0);
     if (!f || noPair.has(t.id + '+' + f.id) || (S.bank.feeRules || []).includes(phraseOf(t.desc))) continue;
     if (suggest.some(s => s.txId === f.id || s.feeTxId === f.id || s.smallId === f.id)) continue;
@@ -724,6 +783,16 @@ function pastDueHtml() {
       <span class="amt num">${amtHtml(x)}</span></button>`).join('')}
   </div>`;
 }
+// Bank charges that could be a payment the app couldn't match by itself: unclaimed, around its date, closest amount first.
+function chargeChoices(p) {
+  const used = new Set([...S.payments.map(q => q.txId), ...S.payments.map(q => q.feeTxId), ...S.receipts.map(r => r.txId), ...S.spending.map(x => x.txId)].filter(Boolean));
+  const from = addDays(p.takenFrom || p.paidOn, -3), to = addDays(p.paidOn, 16), base = p.amount - (p.fee || 0);
+  const b = findB(p.billId);
+  // Charges that carry the bill's name come first, then the closest amounts.
+  const named = t => b && (learned(b, t.desc) || guessed(b, t.desc)) ? 0 : 1;
+  return S.bank.tx.filter(t => t.amount < 0 && !used.has(t.id) && t.date >= from && t.date <= to)
+    .sort((a, c) => named(a) - named(c) || Math.abs(-a.amount - base) - Math.abs(-c.amount - base)).slice(0, 6);
+}
 /* Bill payments marked paid in the app that the bank doesn't show yet. Bill payments can take 3-5 business days,
    so this is a gentle note at first and a red warning after 5 business days. */
 function notClearedHtml() {
@@ -743,7 +812,12 @@ function notClearedHtml() {
       return `<div class="pad" style="border-top:1px solid var(--line)">
         <div style="display:flex;justify-content:space-between;gap:10px"><b>${esc(b.name)}</b><span class="num" style="font-weight:600">${fm(p.amount)}</span></div>
         <div class="small ${late ? 'late-txt' : 'muted'}">Marked paid ${nice(p.paidOn)}${n === 0 ? ' (today)' : n === 1 ? ' (yesterday)' : ` (${n} days ago)`}</div>
-        ${late ? `<div class="btns" style="margin-top:8px"><button class="btn small ghost" data-act="clearNo" data-id="${p.billId}" data-d="${p.due}">It didn't go through</button><button class="btn small" data-act="clearYes" data-id="${p.billId}" data-d="${p.due}">It went through</button></div>` : ''}
+        ${late || (p.takenFrom && p.paidOn < t && chargeChoices(p).length) ? (() => {
+          const cands = chargeChoices(p);
+          return `${cands.length ? `<label for="pick${p.billId}${p.due}" style="margin-top:8px">If it went through, which bank charge was it?</label>
+            <select id="pick${p.billId}${p.due}" data-pick="${p.billId}|${p.due}">${cands.map(t => `<option value="${esc(t.id)}">${nice(t.date)} · ${esc(txName(t))} · ${fm(-t.amount)}</option>`).join('')}<option value="">None of these</option></select>` : ''}
+          <div class="btns" style="margin-top:8px"><button class="btn small ghost" data-act="clearNo" data-id="${p.billId}" data-d="${p.due}">It didn't go through</button><button class="btn small" data-act="clearYes" data-id="${p.billId}" data-d="${p.due}">It went through</button></div>`;
+        })() : ''}
       </div>`;
     }).join('')}
   </div>`;
@@ -838,6 +912,12 @@ function viewHome() {
     if (!b) continue;
     h += `<div class="banner bad"><b>Higher fee than usual:</b> ${esc(b.name)} charged a ${fm(a.fee)} transaction fee on ${nice(a.date)}. The usual fee is ${fm(a.usual)}. You may want to contact them about it.
       <div class="btns" style="margin-top:8px"><button class="btn small ghost" data-act="feeSeen" data-bill="${a.billId}" data-date="${a.date}">Got it</button></div></div>`;
+  }
+  for (const a of (S.bank.priceAlerts || []).filter(a => !a.seen)) {
+    const b = findB(a.billId);
+    if (!b) continue;
+    h += `<div class="banner warn"><b>Price change:</b> ${esc(b.name)} charged ${fm(a.now)} on ${nice(a.date)}, ${a.now > a.was ? 'up' : 'down'} from ${fm(a.was)}. The bill's amount is now ${fm(a.now)}.
+      <div class="btns" style="margin-top:8px"><button class="btn small ghost" data-act="priceSeen" data-bill="${a.billId}">Got it</button></div></div>`;
   }
   const lastAuto = (S.bank.autoLog || [])[0];
   if (bankOn() && lastAuto && Date.now() - lastAuto.at < 6 * HOUR) h += `<div class="banner good">Matched automatically from ${esc(bankName())}: ${lastAuto.names.map(esc).join(', ')}.</div>`;
@@ -1260,6 +1340,7 @@ function pendingItems() {
 function sheetBankBalances() {
   const pays = inTransitPays(), spends = inTransitSpends();
   const m = manualBal();
+  const recent = dueList(addDays(today(), -7), addDays(today(), 1)).filter(x => !x.unknown);
   const items = [...pays.map(p => ({ key: itemKey(p), name: (findB(p.billId) || {}).name || 'Bill', amount: p.amount, date: p.paidOn, tick: diffDays(p.paidOn, today()) <= 5 })),
                  ...spends.map(x => ({ key: itemKey(x), name: x.what + (x.note ? ' · ' + x.note : ''), amount: x.amount, date: x.date, tick: false }))];
   openSheet(`<h3>Balances</h3>
@@ -1284,6 +1365,9 @@ function sheetBankBalances() {
       ${items.length ? `<label>Entered in Bill Planner but not showing in your bank's app yet?</label>
         <p class="hint" style="margin-top:0">Ticked ones are subtracted from the balance you type. Untick any your bank's app already shows.</p>
         ${items.map(i => `<label class="check"><input type="checkbox" name="keep" value="${esc(i.key)}"${i.tick ? ' checked' : ''}> ${esc(i.name)} · ${fm(i.amount)} <span class="muted small">${nice(i.date)}</span></label>`).join('')}` : ''}
+      ${recent.length ? `<label>Bills your bank's app already shows as taken?</label>
+        <p class="hint" style="margin-top:0">These were due in the last week and haven't come through the bank connection yet. Tick any your bank's app already shows, so they aren't subtracted twice.</p>
+        ${recent.map(x => `<label class="check"><input type="checkbox" name="taken" value="${x.b.id}|${x.d}"> ${esc(x.b.name)} · ${x.est ? '~' : ''}${fm(x.amt)} <span class="muted small">due ${nice(x.d)}</span></label>`).join('')}` : ''}
       <div class="btns"><button type="button" class="btn ghost" data-act="close">Close</button><button class="btn">Use this balance</button></div>
     </form>
     <div class="btns"><button class="btn small ghost" data-act="bankRefresh">Check the bank connection for new data</button></div>`);
@@ -1483,8 +1567,15 @@ document.addEventListener('click', e => {
     case 'clearYes': {
       // The payment went through but wasn't matched to a bank transaction: the bank balance already includes it.
       const b = findB(id), p = b && paidRec(b, d);
-      if (p) { p.cleared = true; p.inTransit = false; save(); }
-      render(); toast(`${b ? b.name : 'Bill'} payment marked as gone through.`); break;
+      const sel = document.querySelector(`select[data-pick="${id}|${d}"]`);
+      const t = sel && sel.value && S.bank.tx.find(x => x.id === sel.value);
+      if (p && t) {
+        // Linked to the charge the user picked: use the bank's amount and learn how the bank words this bill.
+        p.txId = t.id; p.txDate = t.date; p.amount = -t.amount + (p.feeTxId ? p.fee || 0 : 0); if (!p.feeTxId) p.fee = 0;
+        if (!learned(b, t.desc)) b.match = [...new Set([...(b.match || []), phraseOf(t.desc)])];
+        runMatching();
+      } else if (p) { p.cleared = true; p.inTransit = false; }
+      save(); render(); toast(`${b ? b.name : 'Bill'} payment marked as gone through.`); break;
     }
     case 'clearNo': {
       const b = findB(id), p = b && paidRec(b, d);
@@ -1538,6 +1629,11 @@ document.addEventListener('click', e => {
     case 'manualClear': S.bank.manual = null; save(); closeSheet(); render(); toast('Back to the automatic balance from the bank connection.'); break;
     case 'feeSeen': {
       const a = (S.bank.feeAlerts || []).find(x => x.billId === el.dataset.bill && x.date === el.dataset.date);
+      if (a) a.seen = true;
+      save(); render(); break;
+    }
+    case 'priceSeen': {
+      const a = (S.bank.priceAlerts || []).find(x => x.billId === el.dataset.bill);
       if (a) a.seen = true;
       save(); render(); break;
     }
@@ -1652,9 +1748,22 @@ document.addEventListener('submit', e => {
       const match = String(fd.get('match') || '').split(',').map(normText).filter(Boolean);
       const o = Object.assign({ name: fd.get('name').trim(), amount: num(fd.get('amount')), fee: num(fd.get('fee')) || 0, match, varies: fd.get('varies') === 'on', active: fd.get('active') === 'on', note: fd.get('note').trim() }, fr);
       let bill;
-      if (id) bill = Object.assign(findB(id), o); else S.bills.push(bill = Object.assign({ id: uid() }, o));
-      // A new bill made from a bank transaction: that transaction is its first payment.
       const tx = f.dataset.tx && S.bank.tx.find(t => t.id === f.dataset.tx);
+      if (id) {
+        bill = findB(id);
+        // A changed schedule starts today; the old one still holds for dates before today (so a bill already due
+        // under the old schedule isn't lost), and its dates after today drop off.
+        if (bill.freq !== o.freq || (bill.day || null) !== (o.day || null) || (bill.anchor || null) !== (o.anchor || null)) {
+          o.prev = { freq: bill.freq, day: bill.day || null, anchor: bill.anchor || null, since: bill.since || null, prev: bill.prev || null, until: addDays(today(), -1) };
+          o.since = today();
+        }
+        Object.assign(bill, o);
+      } else {
+        // A new bill counts from today (or from the bank charge it was made from).
+        o.since = tx ? addDays(tx.date, -10) : today();
+        S.bills.push(bill = Object.assign({ id: uid() }, o));
+      }
+      // A new bill made from a bank transaction: that transaction is its first payment.
       if (!id && tx) {
         const d = occ(bill, addDays(tx.date, -20), addDays(tx.date, 20)).sort((a, c) => Math.abs(diffDays(a, tx.date)) - Math.abs(diffDays(c, tx.date)))[0] || tx.date;
         S.payments.push({ billId: bill.id, due: d, paidOn: tx.date, amount: -tx.amount, txId: tx.id, auto: true });
@@ -1733,7 +1842,17 @@ document.addEventListener('submit', e => {
     case 'fManual': {
       const amount = num(fd.get('amount'));
       if (amount == null) { formError(f, "Type the available balance shown in your bank's app.", 'amount'); return; }
-      S.bank.manual = { amount, at: Date.now(), keep: fd.getAll('keep'), bankBal: S.bank.bal ? S.bank.bal.checking : null };
+      const at = Date.now();
+      S.bank.manual = { amount, at, keep: fd.getAll('keep'), bankBal: S.bank.bal ? S.bank.bal.checking : null };
+      // Bills the bank's app shows as already taken: mark them paid. They count as "on the way" until the bank
+      // connection shows them too, but the typed balance already includes them, so it isn't lowered again.
+      for (const v of fd.getAll('taken')) {
+        const [bid, d] = v.split('|'); const b = findB(bid);
+        if (!b || paidRec(b, d)) continue;
+        const a = billAmt(b);
+        S.payments.push({ billId: b.id, due: d, paidOn: today(), takenFrom: d < today() ? d : today(), amount: a.v, fee: a.fee, adjusted: false, inTransit: true, at: at - 1 });
+      }
+      runMatching();
       save(); closeSheet(); render();
       toast("Using the balance from your bank's app until the bank connection has newer data.");
       return;
