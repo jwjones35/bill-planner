@@ -78,7 +78,7 @@ const SYNC_COLL = {
   payments: r => r.billId + '|' + r.due, receipts: r => r.incomeId + '|' + r.date,
   fuelQ: r => r.id, fuelFlags: r => r.id, vehicles: r => r.id
 };
-const SYNC_FIELDS = ['setupDate', 'balances', 'everydayPerWeek', 'savingsBuffer', 'suggestSavings', 'lastBackup', 'autopayWait', 'cards', 'limits', 'fuelSince'];
+const SYNC_FIELDS = ['setupDate', 'balances', 'everydayPerWeek', 'savingsBuffer', 'suggestSavings', 'lastBackup', 'autopayWait', 'cards', 'limits', 'fuelSince', 'txWho'];
 const SYNC_BANK_LWW = ['labels', 'txNames', 'manual', 'feeAlerts', 'priceAlerts'];
 const SYNC_BANK_UNION = ['ignore', 'noFeePairs', 'feeRules'];
 const SYNC_BANK_FEED = ['accounts', 'tx', 'bal', 'fetchedAt', 'error', 'fetchLog', 'checkingId', 'savingsId'];

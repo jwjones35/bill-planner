@@ -4,6 +4,11 @@
    Every release adds an entry here, in plain words: added, changed, fixed, removed. */
 const CHANGELOG = [
   {
+    v: '2.2.4', date: '2026-11-01',
+    added: ['On Home, "Not known yet" in the fun-spending box can now be tapped. It lists each purchase the app could not match to a person, and one tap on a name sorts it. Tapping a name for a card remembers that card for every purchase after it.'],
+    fixed: ['Streaming and game bills (Netflix, Blizzard and the like) used to count as "Not known yet". They now show as "Shared bills", because you both use them.']
+  },
+  {
     v: '2.2.3', date: '2026-11-01',
     fixed: ['Gas-station purchases from before the vehicles were added showed as "not split yet" with a message to add vehicles. Every gas-station purchase the bank shows is now split into fuel and snacks.']
   },

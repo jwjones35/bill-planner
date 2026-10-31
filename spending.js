@@ -70,7 +70,10 @@ const me = () => (profile() || {}).name || null;
 const cardOwner = c => { const o = c && (S.cards || {})[c]; return o && o !== SHARED ? o : null; };
 // Who made a station purchase: answered for that purchase, or the card's owner.
 const whoOfRecord = q => q.who || cardOwner(q.card) || null;
+const SHARED_BILLS = 'Shared bills';
+const UNKNOWN = 'Not known yet';
 function whoOfTx(t) {
+  const set = (S.txWho || {})[t.id]; if (set) return set; // tapped for this one purchase
   const q = (S.fuelQ || []).find(q => q.txId === t.id);
   return (q && whoOfRecord(q)) || cardOwner(cardOf(t.desc));
 }
@@ -88,7 +91,7 @@ function spendSummary(from, to) {
   const add = (cat, amt, who) => {
     if (amt < 0.005) return;
     cats[cat] = (cats[cat] || 0) + amt;
-    const w = who || 'Not known yet';
+    const w = who || UNKNOWN;
     byWho[w] = byWho[w] || {}; byWho[w][cat] = (byWho[w][cat] || 0) + amt;
   };
   const splits = stationSplits();
@@ -105,7 +108,7 @@ function spendSummary(from, to) {
   // (They are still bills for "Available to spend"; this only reports them here.)
   for (const p of S.payments) {
     const d = p.paidOn || p.due, b = findB(p.billId);
-    if (d >= from && d < to && b && billIsFun(b)) add('fun', p.amount, null);
+    if (d >= from && d < to && b && billIsFun(b)) add('fun', p.amount, SHARED_BILLS);
   }
   const fun = sum(FUN_CATS.map(c => cats[c] || 0));
   return { cats, byWho, unsplit, fun };
@@ -131,7 +134,9 @@ function meterHtml() {
   return `<h2>This week's fun spending<span class="tot num">${fm(s.fun)}</span></h2><div class="card pad meter">
     <div class="small muted" style="margin-bottom:6px">Eating out, snacks and drinks, alcohol and entertainment since Monday${pct != null ? ` · <b>${pct}%</b> of a week's take-home pay` : ''}. Gas-station snacks are worked out automatically.</div>
     ${bars}
-    ${who.length ? `<div class="small" style="margin-top:8px">${who.map(([w, v]) => `<b>${esc(w === me() ? 'Me' : w)}</b> ${fm(v)}`).join(' · ')}</div>` : ''}
+    ${who.length ? `<div class="small" style="margin-top:8px">${who.map(([w, v]) => w === UNKNOWN
+      ? `<a href="#" data-act="whoUnknown" class="who-unknown"><b>${UNKNOWN}</b> ${fm(v)} (tap to sort)</a>`
+      : `<b>${esc(sameName(w, me()) ? 'Me' : w)}</b> ${fm(v)}`).join(' · ')}</div>` : ''}
     ${s.unsplit.length ? `<div class="small muted" style="margin-top:6px">${s.unsplit.length} gas-station purchase${s.unsplit.length === 1 ? '' : 's'} (${fm(sum(s.unsplit.map(p => p.amt)))}) not split into fuel and snacks yet. ${vehicles().length ? (profile() ? 'They will be the next time the bank data updates.' : 'Add your name under More › Profile first.') : 'Add your vehicles under More › Spending watch.'}</div>` : ''}
     <div class="btns" style="margin-top:8px"><button class="btn small ghost" data-act="spLimits">Weekly limits</button></div></div>`;
 }
@@ -395,6 +400,41 @@ function sheetCard(c) {
     <div class="btns"><button class="btn small ghost" data-act="spCardSet" data-id="${c}" data-name="${SHARED}">We both use this card</button></div>`);
 }
 
+/* ---------- "Not known yet": sort out whose purchases they were, one tap each ----------
+   For a purchase on a card, the tap remembers the whole card (every purchase on it, before and after). For one
+   with no card number (online purchases and the like), it's set for that purchase only. */
+function unknownFun(from, to) {
+  const out = [];
+  for (const t of spendingTx(from, to)) {
+    const c = txCat(t);
+    if (!(c === 'station' || (CATS[c] && CATS[c].fun)) || whoOfTx(t)) continue;
+    out.push({ t, card: cardOf(t.desc), name: storeName(t), amt: -t.amount });
+  }
+  for (const x of S.spending.filter(x => !x.txId && !x.who && x.date >= from && x.date < to && CATS[catKey(x.what)] && CATS[catKey(x.what)].fun))
+    out.push({ x, name: x.what + (x.note ? ' · ' + x.note : ''), amt: x.amount });
+  return out;
+}
+function sheetUnknownWho() {
+  const ws = weekStart(today()), list = unknownFun(ws, addDays(ws, 7));
+  if (!list.length) { closeSheet(); render(); toast('Everything this week is sorted.'); return; }
+  openSheet(`<h3>Whose purchases were these?</h3>
+    <p class="hint">One tap each. For a card, the whole card is remembered, so its other purchases are sorted too.</p>
+    ${list.map(it => `<div class="pad" style="border-top:1px solid var(--line);padding-left:0;padding-right:0">
+      <div style="display:flex;justify-content:space-between;gap:10px"><b>${esc(it.name)}</b><span class="num" style="font-weight:600">${fm(it.amt)}</span></div>
+      <div class="small muted">${nice(it.t ? it.t.date : it.x.date)}${it.card ? ` · card ending ${it.card}` : it.t ? ' · no card number shown' : ' · entered by hand'}</div>
+      <div class="btns" style="margin-top:6px">${people().map(n => `<button class="btn small ghost" data-act="whoAssign" data-tx="${it.t ? esc(it.t.id) : ''}" data-sp="${it.x ? it.x.id : ''}" data-card="${it.card || ''}" data-name="${esc(n)}">${esc(n)}${it.card ? "'s card" : ''}</button>`).join('')}</div></div>`).join('')}
+    <div class="btns"><button class="btn ghost block" data-act="close">Done</button></div>`);
+}
+function whoAssign(el) {
+  const n = el.dataset.name, card = el.dataset.card;
+  if (card) S.cards = Object.assign({}, S.cards, { [card]: n });
+  else if (el.dataset.tx) S.txWho = Object.assign({}, S.txWho, { [el.dataset.tx]: n });
+  else if (el.dataset.sp) { const x = S.spending.find(s => s.id === el.dataset.sp); if (x) x.who = n; }
+  save(); render();
+  toast(card ? `Card ending ${card} is ${n}'s.` : `Marked as ${n}'s.`);
+  sheetUnknownWho();
+}
+
 /* ---------- one-time setup note ----------
    Settings prepared for the household (for example vehicles and cards) can be left in the sync storage. The first
    phone that opens the app picks them up (the note is deleted at that moment) and adds them; sharing then gives
@@ -426,6 +466,8 @@ function spendAct(act, el) {
   const q = el.dataset.id && (S.fuelQ || []).find(x => x.id === el.dataset.id);
   switch (act) {
     case 'whoSet': if (q) whoSet(q, el.dataset.name); return true;
+    case 'whoUnknown': sheetUnknownWho(); return true;
+    case 'whoAssign': whoAssign(el); return true;
     case 'whoShared': if (q) { S.cards = Object.assign({}, S.cards, { [q.card]: SHARED }); save(); sheetWho(q); } return true;
     case 'fqUnknown': if (q) fqUnknown(q); return true;
     case 'fqUnknownYes': if (q) fqUnknownYes(q); return true;
