@@ -1,0 +1,8 @@
+name = "bill-planner-sync"
+main = "src/index.js"
+compatibility_date = "2025-06-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "bill-planner-sync"
+database_id = "d479704c-e14e-472a-b3de-9948ac012d3e"

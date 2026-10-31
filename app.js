@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's available to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '1.6.1';
+const APP_VERSION = '1.7.0';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -76,8 +76,10 @@ function save() {
   const r2 = n => Math.round((Number(n) || 0) * 100) / 100;
   S.balances.checking = r2(S.balances.checking);
   S.balances.savings = r2(S.balances.savings);
+  syncStamp(); // when sharing with another phone: note what changed, so it can be merged there
   try { localStorage.setItem(KEY, JSON.stringify(S)); }
   catch (e) { toast('Could not save on this device. Make a backup file from More.'); }
+  syncSoon();
 }
 
 /* ---------- profile: who uses this phone ----------
@@ -290,7 +292,10 @@ const BANK_KEY = 'billplanner.bank';
 const HOUR = 3600000;
 let bankBusy = false;
 function bankAccess() { try { return localStorage.getItem(BANK_KEY) || ''; } catch (e) { return ''; } }
-function setBankAccess(v) { try { if (v) localStorage.setItem(BANK_KEY, v); else localStorage.removeItem(BANK_KEY); } catch (e) { } }
+function setBankAccess(v) {
+  try { if (v) localStorage.setItem(BANK_KEY, v); else localStorage.removeItem(BANK_KEY); } catch (e) { }
+  if (!syncApplying) setBankUpd(Date.now()); // connecting or disconnecting here also applies to a shared phone
+}
 const bankOn = () => !!(S && bankAccess() && S.bank.checkingId && S.bank.bal);
 const bankName = () => { const a = S.bank.accounts.find(x => x.id === S.bank.checkingId); return (a && a.org) || 'your bank'; };
 // "today 6:10 AM", "yesterday 9:42 PM", "Wed Oct 28 7:05 AM"
@@ -1092,6 +1097,7 @@ function viewMore() {
   <h2>Profile</h2><div class="card"><button class="row" data-act="profile"><span class="main">
     <div class="name">${pr && pr.name ? esc(pr.name) : 'Who uses this phone?'}</div>
     <div class="sub">${pr && pr.name ? 'This phone · tap to change' : 'Tap to add your name, so your own paychecks show as "Me"'}</div></span></button></div>
+  ${syncCardHtml()}
   <h2>Bank connection</h2><div class="card">${bankAccess()
     ? `<div class="pad"><div><b>${bankOn() ? `Connected to ${esc(bankName())}` : 'Connected, waiting for the first update'}</b></div>
         <div class="small muted">${bankBusy ? 'Updating now...' : S.bank.fetchedAt ? `${S.bank.bal ? bankAgeText() + '. ' : ''}SimpleFIN gets new data from the bank about once a day; the app checks for it every hour while open (last checked ${timeAgo(S.bank.fetchedAt)}).` : 'Not updated yet.'}</div>
@@ -1141,6 +1147,10 @@ function viewWelcome() {
   <div class="card pad" style="margin-top:16px">
     <label class="btn block file-btn" style="margin:0">Load my starter or backup file<input type="file" accept=".json,application/json" data-act="restore"></label>
     <div class="btns"><button class="btn ghost" data-act="startEmpty">Start empty</button><button class="btn ghost" data-act="demo">Try a demo</button></div>
+  </div>
+  <div class="card pad" style="margin-top:12px">
+    <p style="margin-top:0"><b>Someone already uses Bill Planner?</b> Share their app: they tap <b>More › Share with another phone › Add another phone</b> and you type the code it shows.</p>
+    <div class="btns"><button class="btn block" data-act="syncJoin">Join another phone's app</button></div>
   </div>`;
 }
 
@@ -1746,9 +1756,12 @@ document.addEventListener('click', e => {
     case 'erase':
       if (confirm('Erase all bills, paychecks and history from this device? Make a backup first if you might want it back.')) {
         try { localStorage.removeItem(KEY); } catch (x) { }
+        setSyncCfg(null); // erasing this phone also stops sharing on it (the other phone keeps its copy)
         S = null; tab = 'home'; render();
       }
       break;
+    default:
+      if (act && act.startsWith('sync')) syncAct(act);
   }
 });
 document.addEventListener('change', e => {
@@ -1981,6 +1994,7 @@ document.addEventListener('submit', e => {
       S.savingsBuffer = num(fd.get('buffer')) || 0;
       save(); closeSheet(); render(); break;
     }
+    case 'fJoin': syncSubmitJoin(f); break;
   }
 });
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet(); });
@@ -1993,10 +2007,16 @@ document.addEventListener('focusin', e => {
 });
 
 // Re-draw when the app comes back to the front (the date may have changed).
-document.addEventListener('visibilitychange', () => { if (!document.hidden) { render(); fetchBank(false); } });
+// When sharing with another phone, bring in its changes first, then check the bank.
+async function refreshAll() { if (syncLinked()) await syncNow(); fetchBank(false); }
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { render(); refreshAll(); } });
+// While the app is open, check the other phone's changes every 30 seconds.
+setInterval(() => { if (!document.hidden && syncLinked()) syncNow(); }, 30000);
+window.addEventListener('online', () => { if (syncLinked()) syncNow(); });
 
 render();
-fetchBank(false); // updates from the bank if connected and the last update is over an hour old
+syncTakeSnap();
+refreshAll(); // the bank updates if connected and the last update is over an hour old
 // The one-time "Whose phone is this?" question, once there are paychecks to label.
 if (S && S.incomes.length) setTimeout(askProfileOnce, 600);
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => { });

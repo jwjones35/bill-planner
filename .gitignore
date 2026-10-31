@@ -13,3 +13,7 @@ desktop.ini
 
 # Local test simulator (fake data only)
 _sim/
+
+# Sync worker tooling
+sync-worker/node_modules/
+sync-worker/.wrangler/
