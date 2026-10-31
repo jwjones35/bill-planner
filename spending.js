@@ -384,6 +384,32 @@ function sheetCard(c) {
     <div class="btns"><button class="btn small ghost" data-act="spCardSet" data-id="${c}" data-name="${SHARED}">We both use this card</button></div>`);
 }
 
+/* ---------- one-time setup note ----------
+   Settings prepared for the household (for example vehicles and cards) can be left in the sync storage. The first
+   phone that opens the app picks them up (the note is deleted at that moment) and adds them; sharing then gives
+   them to the other phone too. Existing entries with the same name aren't duplicated. */
+async function checkInbox() {
+  const cfg = syncCfg(); if (!cfg || !S) return false;
+  const k = await syncKeys(cfg);
+  const r = await api('GET', `/v1/h/${cfg.id}/inbox`, k.token);
+  if (r.status !== 200 || !r.j || !r.j.data) return false;
+  let d; try { d = JSON.parse(r.j.data); } catch (e) { return false; }
+  const added = [];
+  for (const v of (Array.isArray(d.vehicles) ? d.vehicles : [])) {
+    if (!v || !v.name) continue;
+    const o = { name: String(v.name), driver: v.driver || null, mpgLow: Number(v.mpgLow) || 18, mpgHigh: Number(v.mpgHigh) || 20, tank: Number(v.tank) || 20, milesPerDay: Number(v.milesPerDay) || 30 };
+    const same = vehicles().find(x => sameName(x.name, o.name));
+    if (same) Object.assign(same, o); else S.vehicles = vehicles().concat([Object.assign({ id: uid() }, o)]);
+    added.push(o.name);
+  }
+  if (d.cards && typeof d.cards === 'object') S.cards = Object.assign({}, S.cards, d.cards);
+  if (added.length && !S.fuelSince) S.fuelSince = addDays(today(), -7);
+  if (d.limits && typeof d.limits === 'object') S.limits = Object.assign({}, S.limits, d.limits);
+  spendScan(); save(); render();
+  if (added.length) toast(`Added: ${added.join(' and ')}. Gas-station purchases are now split automatically.`);
+  return true;
+}
+
 /* ---------- buttons and forms (the app passes these on) ---------- */
 function spendAct(act, el) {
   const q = el.dataset.id && (S.fuelQ || []).find(x => x.id === el.dataset.id);

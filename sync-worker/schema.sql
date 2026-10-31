@@ -31,6 +31,13 @@ CREATE TABLE IF NOT EXISTS prices (
   source TEXT,
   period TEXT
 );
+-- A one-time setup note for a household (for example vehicles), written only by the owner with Wrangler.
+-- The app reads it once and it's deleted at that moment.
+CREATE TABLE IF NOT EXISTS inbox (
+  household TEXT PRIMARY KEY,
+  data TEXT NOT NULL,
+  at INTEGER NOT NULL
+);
 -- One-time codes for adding a phone: the encrypted household key, gone after one use or 15 minutes.
 CREATE TABLE IF NOT EXISTS pairs (
   code TEXT PRIMARY KEY,

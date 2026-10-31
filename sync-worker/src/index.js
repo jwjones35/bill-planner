@@ -172,7 +172,7 @@ export default {
       }
       return json(req, 405, { error: 'method not allowed' });
     }
-    const m = url.pathname.match(/^\/v1\/h\/([A-Za-z0-9_-]{16,64})(?:\/(sub|sched|test|notify|subs|fuelprice))?$/);
+    const m = url.pathname.match(/^\/v1\/h\/([A-Za-z0-9_-]{16,64})(?:\/(sub|sched|test|notify|subs|fuelprice|inbox))?$/);
     if (!m) return json(req, 404, { error: 'not found' });
     const id = m[1];
     const token = (req.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
@@ -220,6 +220,14 @@ export default {
         if (url.searchParams.get('check') === '1') info = await fetchPrices(env).catch(e => ({ error: String(e) }));
         const p = await env.DB.prepare("SELECT price, low, high, stations, at, source, period FROM prices WHERE area = 'home'").first();
         return json(req, 200, p ? Object.assign({}, p, { info }) : { price: null, info });
+      }
+      // A one-time setup note: handed to the first phone that asks, and deleted right then. (There's no way to
+      // write one from outside; only the owner can, with Wrangler.)
+      if (m[2] === 'inbox' && req.method === 'GET') {
+        const n = await env.DB.prepare('SELECT data FROM inbox WHERE household = ?').bind(id).first();
+        if (!n) return json(req, 200, { data: null });
+        await env.DB.prepare('DELETE FROM inbox WHERE household = ?').bind(id).run();
+        return json(req, 200, { data: n.data });
       }
       // Which people have a phone set up for notifications (their codes only).
       if (m[2] === 'subs' && req.method === 'GET') {

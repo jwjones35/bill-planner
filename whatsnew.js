@@ -4,6 +4,10 @@
    Every release adds an entry here, in plain words: added, changed, fixed, removed. */
 const CHANGELOG = [
   {
+    v: '2.2.1', date: '2026-10-31',
+    added: ['Settings can be prepared for you and picked up by the app automatically, such as your two vehicles with their miles a day worked out from your usual drives.']
+  },
+  {
     v: '2.2.0', date: '2026-10-31',
     changed: ['Gas-station purchases are now split into fuel and snacks automatically, with no typing.',
       'A round-dollar charge ($20.00, $30.00) counts as fuel paid at the counter. Other amounts count as fuel up to what that vehicle has burned since its last stop (its usual miles a day, its miles per gallon and the current gas price); the rest counts as snacks and drinks.',
