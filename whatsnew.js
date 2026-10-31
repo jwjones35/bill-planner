@@ -4,6 +4,13 @@
    Every release adds an entry here, in plain words: added, changed, fixed, removed. */
 const CHANGELOG = [
   {
+    v: '1.9.4', date: '2026-10-31',
+    removed: ['The "everyday spending" estimate. Food, gas and fun are no longer guessed anywhere; what you really spend still lowers your balance as it happens.'],
+    changed: ['Paydays: a week where one paycheck is less than that week\'s bills now says "Covered by your cushion" in grey instead of a red "Short by". Red only appears if the cushion itself would run out ("Not enough").',
+      '"Expected cushion" is now "Cushion after this payday": checking plus everyone\'s paychecks, minus bills.',
+      'The status at the top of Home warns if any of the next few paydays would run short.']
+  },
+  {
     v: '1.9.3', date: '2026-10-31',
     changed: ['A comic-book look everywhere: bold ink outlines, solid drop shadows, shading with a hard edge, and halftone dots in the shadows.',
       'Buttons press down into their shadow when tapped.',

@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's available to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '1.9.3';
+const APP_VERSION = '1.9.4';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -209,17 +209,16 @@ const lookback = () => { const t = addDays(today(), -365); return t > S.setupDat
 function nextPayday() { const l = payList(addDays(today(), 1), addDays(today(), 45)); return l.length ? l[0].d : null; }
 
 /* Available to spend = checking - unpaid bills due before the next payday - money set aside.
-   Everyday spending is NOT subtracted here; it is shown separately as an estimate. */
+   Everyday spending (food, fun, gas) is never guessed: real purchases lower the balance as they happen. */
 function calc() {
   const t = today();
   const np = nextPayday() || addDays(t, 14);
   const bills = dueList(lookback(), np);
   const billsTotal = sum(bills.map(x => x.amt));
   const days = Math.max(0, diffDays(t, np));
-  const everyday = (S.everydayPerWeek || 0) * days / 7;
   const aside = sum(S.setAsides.map(a => a.amount || 0));
   const safe = checkingNow() - billsTotal - aside;
-  return { np, hasPay: !!nextPayday(), bills, billsTotal, days, everyday, aside, safe, unknown: bills.filter(x => x.unknown) };
+  return { np, hasPay: !!nextPayday(), bills, billsTotal, days, aside, safe, unknown: bills.filter(x => x.unknown) };
 }
 /* Estimated available to spend next week = today's available + next payday's expected pay - bills due before the
    payday after it. It assumes nothing else is spent before payday, so recorded spending lowers both figures.
@@ -268,8 +267,8 @@ function periods(n = 8, countTodaysPay = true) {
   const out = [];
   // Today's paychecks that haven't been confirmed yet are expected, so the projection includes them.
   const todayPays = payList(t, addDays(t, 1));
-  // The forecast does allow for everyday spending, starting with the days until the next payday.
-  let run = c.safe - c.everyday + (countTodaysPay ? sum(todayPays.map(p => p.amt)) : 0);
+  // The cushion: what's available to spend now, plus every paycheck (everyone's), minus every bill.
+  let run = c.safe + (countTodaysPay ? sum(todayPays.map(p => p.amt)) : 0);
   for (let i = 0; i < Math.min(n, dates.length); i++) {
     const d = dates[i];
     const end = dates[i + 1] || addDays(d, i > 0 ? diffDays(dates[i - 1], d) : 14);
@@ -277,10 +276,9 @@ function periods(n = 8, countTodaysPay = true) {
     const inTot = sum(incs.map(p => p.amt));
     const bills = dueList(d, end);
     const bt = sum(bills.map(x => x.amt));
-    const ev = (S.everydayPerWeek || 0) * diffDays(d, end) / 7;
-    const left = inTot - bt - ev;
+    const left = inTot - bt;
     run += left;
-    out.push({ d, end, incs, inTot, bills, bt, ev, left, run });
+    out.push({ d, end, incs, inTot, bills, bt, left, run });
   }
   return { c, out, todayPays };
 }
@@ -865,22 +863,23 @@ function statusHtml(c, nw) {
   const late = pastDue().length + autopayLate().length;
   const pay = !c.hasPay ? 'payday' : diffDays(t, c.np) <= 6 ? WDL[new Date(parseD(c.np)).getUTCDay()] : nice(c.np);
   const payWhen = c.hasPay ? `until ${pay}` : 'for now';
-  let level, title, text;
+  let level, title, text, low;
   if (c.safe < 0) {
     level = 'bad'; title = `Short ${fm(-c.safe)} before ${c.hasPay ? pay + "'s pay" : 'payday'}`;
     text = 'The bills due before then add up to more than what is in checking. See what is due below; some may be able to wait a few days.';
   } else if (late) {
     level = 'bad'; title = late === 1 ? 'A bill is past due' : `${late} bills are past due`;
     text = `See ${late === 1 ? 'it' : 'them'} under Needs your attention. After ${late === 1 ? 'that' : 'those'}, there's ${fm(c.safe)} to spend ${payWhen}.`;
-  } else if (c.everyday && c.safe < c.everyday) {
-    level = 'warn'; title = `Tight ${payWhen}`;
-    text = `${fm(c.safe)} to spend, and everyday spending usually comes to about ${fm(c.everyday)} by then. Go easy until the paycheck.`;
   } else if (nw && nw.available < 0) {
     level = 'warn'; title = 'Next week looks short';
     text = `${fm(c.safe)} to spend ${payWhen}, but after next week's bills it would be about ${fm(-nw.available)} short. Keep some back.`;
   } else if (nw && nw.short > 0) {
     level = 'warn'; title = 'Keep some back for next week';
     text = `${fm(c.safe)} to spend ${payWhen}, but keep at least ${fm(nw.short)} of it: next week's pay won't cover next week's bills.`;
+  } else if ((low = periods(4).out.find(p => p.run < 0))) {
+    // Further ahead: a payday where the bills would come to more than the money there is by then.
+    level = 'warn'; title = 'The coming weeks look short';
+    text = `${fm(c.safe)} to spend ${payWhen}, but by the ${nice(low.d)} payday the bills would be about ${fm(-low.run)} more than the money there is. Keep some back. See Paydays.`;
   } else {
     level = 'good'; title = "You're on track";
     text = `${fm(c.safe)} to spend ${payWhen}, after the bills due before then.`;
@@ -993,7 +992,6 @@ function viewHome() {
          ${!bankBusy && Date.now() - bankAsOf() > 36 * HOUR ? `<div class="small" style="margin-top:4px;color:var(--warn)">The bank data is over a day old, so recent purchases may be missing. For an up-to-the-minute number, enter today's balance from your bank's app.</div>` : ''}`)
         + (S.bank.error ? `<div class="small neg" style="margin-top:4px">${esc(S.bank.error)}</div>` : '')
       : `<div class="small muted" style="margin-top:4px">${stale} · <a href="#" data-act="balances">Update</a></div>`}
-    ${c.everyday ? `<div class="small muted" style="margin-top:4px">Usual everyday spending until then: about ${fm(c.everyday)} <span class="tag">not subtracted</span></div>` : ''}
       <div class="breakdown num">
         ${bankOn() ? `<div><span>${manualBal() ? "Checking (entered from your bank's app)" : `Checking at ${esc(bankName())}`}</span><span>${fm(manualBal() ? manualBal().amount : S.bank.bal.checking)}</span></div>
         ${Math.abs(checkingNow() - (manualBal() ? manualBal().amount : S.bank.bal.checking)) > 0.004 ? `<div><span>Paid in the app, not showing at the bank yet</span><span>−${fm((manualBal() ? manualBal().amount : S.bank.bal.checking) - checkingNow())}</span></div>` : ''}`
@@ -1045,7 +1043,7 @@ function viewHome() {
   if (S.suggestSavings && c.hasPay && !(bankOn() && S.bank.suggest.length)) {
     // Only suggest saving if the cushion stays above the buffer for the next few paydays too,
     // without counting paychecks that haven't been confirmed yet.
-    const lowest = Math.min(c.safe - c.everyday, ...periods(4, false).out.map(p => p.run));
+    const lowest = Math.min(c.safe, ...periods(4, false).out.map(p => p.run));
     const extra = Math.floor((lowest - (S.savingsBuffer || 0)) / 25) * 25;
     if (extra >= 25) good += `<div class="banner good">You could move <b>${fm(extra)}</b> to savings and still keep at least a ${fm(S.savingsBuffer)} cushion over the next few paydays.</div>`;
   }
@@ -1117,28 +1115,32 @@ function viewPay() {
     h += `<h2>Payday today<span class="tot num">${todayPays.some(p => p.est) ? '~' : ''}${fm(sum(todayPays.map(p => p.amt)))}</span></h2><div class="card">` + todayPays.map(p => incRow(p)).join('') +
       `<div class="empty">Tap each one when it shows up in your bank, to add it to checking.</div></div>`;
   }
-  h += `<div class="card pad" style="margin-top:14px"><div class="small muted">Now until ${c.hasPay ? nice(c.np) : 'payday'}</div><div class="num" style="font-size:22px;font-weight:700"><span class="${c.safe < 0 ? 'neg' : ''}">${fm(c.safe)}</span> <span class="small muted" style="font-weight:400">available to spend${todayPays.length ? ', before today\'s pay' : ''}</span></div>
-    ${c.everyday ? `<div class="small muted">Usual everyday spending until then: about ${fm(c.everyday)}. The forecast below allows for it.</div>` : ''}</div>`;
+  h += `<div class="card pad" style="margin-top:14px"><div class="small muted">Now until ${c.hasPay ? nice(c.np) : 'payday'}</div><div class="num" style="font-size:22px;font-weight:700"><span class="${c.safe < 0 ? 'neg' : ''}">${fm(c.safe)}</span> <span class="small muted" style="font-weight:400">available to spend${todayPays.length ? ', before today\'s pay' : ''}</span></div></div>`;
   if (!out.length) {
     h += `<div class="banner warn">No paychecks set up yet. <a href="#" data-act="editInc">Add a paycheck</a></div>`;
     return h;
   }
   for (const p of out) {
-    const short = p.left < 0;
+    // Only a negative cushion is a real problem. A payday whose pay is less than its own bills is normal on
+    // weeks when only one paycheck comes in: the cushion from earlier paydays covers it.
+    const verdict = p.run < 0
+      ? `<div class="sum period-bad"><span>Not enough: about ${fm(-p.run)} short by this payday</span></div>`
+      : p.left < 0
+        ? `<div class="sum period-calm"><span>Pay is ${fm(-p.left)} less than these bills. Covered by your cushion.</span></div>`
+        : `<div class="sum"><span>Left over after these bills</span><span class="pos">${fm(p.left)}</span></div>`;
     h += `<div class="card period" style="margin-top:12px">
       <div class="head"><span class="when">${nice(p.d)}</span><span class="small muted">to ${nice(addDays(p.end, -1))}</span></div>
       ${p.incs.map(x => incRow(x)).join('')}
       <div class="lines num">
         <div><span>Paychecks</span><span>${p.incs.some(x => x.est) ? '~' : ''}${fm(p.inTot)}</span></div>
         <div><span>Bills (${p.bills.length})</span><span>−${fm(p.bt)}</span></div>
-        <div><span>Everyday spending</span><span>−${fm(p.ev)}</span></div>
-        <div class="sum"><span>${short ? 'Short by' : 'Left over'}</span><span class="${short ? 'neg' : 'pos'}">${fm(Math.abs(p.left))}</span></div>
-        <div class="muted"><span>Expected cushion after</span><span class="${p.run < 0 ? 'neg' : ''}">${fm(p.run)}</span></div>
+        ${verdict}
+        <div class="muted"><span>Cushion after this payday</span><span class="${p.run < 0 ? 'neg' : ''}">${fm(p.run)}</span></div>
       </div>
       ${p.bills.length ? `<details><summary>Show the ${p.bills.length} bill${p.bills.length === 1 ? '' : 's'}</summary>${p.bills.map(billRow).join('')}</details>` : ''}
     </div>`;
   }
-  h += `<p class="small muted" style="margin:14px 4px">"Expected cushion" is a forecast: what's available to spend now, minus usual everyday spending, plus each paycheck, minus bills. Set everyday spending to 0 under More › Planning to leave it out. ~ means an estimate.</p>`;
+  h += `<p class="small muted" style="margin:14px 4px">"Cushion" is a forecast: what's available to spend now, plus every paycheck (everyone's), minus every bill. Everyday spending like food, gas and fun isn't guessed; whatever you spend comes out of the cushion. ~ means an estimate.</p>`;
   return h;
 }
 function incRow(p) {
@@ -1220,7 +1222,6 @@ function viewMore() {
     <div class="list-actions"><button class="btn small ghost" data-act="editInfo">+ Add info</button></div></div>
 
   <h2>Planning</h2><div class="card">
-    <button class="row" data-act="planning"><span class="main"><div class="name">Everyday spending</div><div class="sub">Groceries, gas, eating out and so on</div></span><span class="amt num">${fm(S.everydayPerWeek)}/wk</span></button>
     <button class="row" data-act="planning"><span class="main"><div class="name">Savings tips</div><div class="sub">${S.suggestSavings ? `On, keeps a ${fm(S.savingsBuffer)} cushion` : 'Off'}</div></span></button></div>
 
   <h2>Reminders</h2><div class="card pad">
@@ -1578,8 +1579,6 @@ function sheetBalances() {
 }
 function sheetPlanning() {
   openSheet(`<form id="fPlan"><h3>Planning</h3>
-    <label for="eDay">Everyday spending per week</label><input id="eDay" name="everyday" inputmode="decimal" value="${money2(S.everydayPerWeek)}">
-    <p class="hint">Groceries, gas, eating out, household things. Shown next to "available to spend" and used in the Paydays forecast, but not subtracted from it.</p>
     <label class="check"><input type="checkbox" name="suggest"${S.suggestSavings ? ' checked' : ''}> Suggest moving extra money to savings</label>
     <label for="sBuf">Cushion to keep before suggesting savings</label><input id="sBuf" name="buffer" inputmode="decimal" value="${money2(S.savingsBuffer)}">
     <div class="btns">${cancelBtn}<button class="btn">Save</button></div></form>`);
@@ -1692,7 +1691,7 @@ function demoState() {
   const t = today();
   const nextFri = addDays(t, (5 - new Date(parseD(t)).getUTCDay() + 7) % 7);
   s.balances = { checking: 1240.55, savings: 310, updated: t };
-  s.everydayPerWeek = 450; s.savingsBuffer = 200;
+  s.savingsBuffer = 200;
   s.incomes = [
     { id: uid(), name: 'Acme Corp', owner: 'Me', freq: 'biweekly', anchor: nextFri, amount: 1450, varies: false },
     { id: uid(), name: 'Corner Cafe', owner: 'Alex', freq: 'weekly', anchor: nextFri, amount: 380, varies: true }
@@ -2104,7 +2103,6 @@ document.addEventListener('submit', e => {
       break;
     }
     case 'fPlan': {
-      S.everydayPerWeek = num(fd.get('everyday')) || 0;
       S.suggestSavings = fd.get('suggest') === 'on';
       S.savingsBuffer = num(fd.get('buffer')) || 0;
       save(); closeSheet(); render(); break;

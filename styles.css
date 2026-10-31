@@ -163,6 +163,8 @@ button.card.row { border-top: 0; }
 .period .lines { padding: 0 16px 12px; font-size: 14px; }
 .period .lines div { display: flex; justify-content: space-between; padding: 2px 0; }
 .period .lines .sum { border-top: 1px solid var(--line); margin-top: 4px; padding-top: 6px; font-weight: 600; }
+.period .lines .period-calm { color: var(--muted); font-weight: 500; }
+.period .lines .period-bad { color: var(--bad); }
 .period details summary { padding: 8px 16px 12px; color: var(--brand); font-size: 14px; cursor: pointer; list-style: none; }
 .period details summary::-webkit-details-marker { display: none; }
 .inc-btn { margin-left: 8px; }
