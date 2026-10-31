@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's available to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '1.5.1';
+const APP_VERSION = '1.5.2';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -1153,14 +1153,32 @@ function sheetBankBalances() {
     <div class="btns"><button class="btn small ghost" data-act="bankRefresh">Check the bank connection for new data</button></div>`);
 }
 function sheetConnect() {
+  /* A general guide on purpose: SimpleFIN's own screens walk people through their part, so this doesn't name
+     their buttons (which can change). Only the Bill Planner part is step by step. */
   openSheet(`<form id="fConnect"><h3>Connect your bank</h3>
-    <ol class="small" style="padding-left:20px;margin:8px 0">
-      <li>On SimpleFIN Bridge (bridge.simplefin.org), sign up and connect your bank. You sign in to your bank there, not here.</li>
-      <li>In SimpleFIN, create a new <b>app connection</b> and copy the <b>setup token</b> it shows.</li>
-      <li>Paste it below. Each phone needs its own setup token.</li></ol>
+    <p class="small">Bill Planner reads your balance and transactions through <b>SimpleFIN Bridge</b>, a separate service that costs about $1.50 a month or $15 a year. Your bank login goes to SimpleFIN, never to Bill Planner, and the connection is read-only: nothing can move money with it.</p>
+
+    <label style="color:var(--text);font-weight:600;font-size:16px">What you'll do on SimpleFIN</label>
+    <ul class="small" style="padding-left:20px;margin:6px 0">
+      <li><b>Create a SimpleFIN account</b> at <a href="https://bridge.simplefin.org" target="_blank" rel="noopener">bridge.simplefin.org</a>.</li>
+      <li><b>Connect your bank</b> there, signing in with your bank's own username and password. SimpleFIN's screens walk you through it.</li>
+      <li><b>Get a setup token for a new app</b> and copy it. It's a long code that works only once.</li></ul>
+    <p class="hint">Tip: do the last part on this phone, so you can paste the setup token straight in. Each phone using Bill Planner needs its own setup token. Never share it with anyone.</p>
+
+    <label style="color:var(--text);font-weight:600;font-size:16px">Then, here in Bill Planner</label>
+    <ol class="small" style="padding-left:20px;margin:6px 0">
+      <li>Paste the setup token in the box below.</li>
+      <li>Tap <b>Connect</b>.</li>
+      <li>If asked, choose which account is your <b>checking</b> and which is your <b>savings</b>.</li></ol>
     <label for="sfTok">SimpleFIN setup token</label><textarea id="sfTok" name="token" rows="3" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste the setup token here"></textarea>
-    <p class="hint">Only a read-only connection key is kept, on this phone only. It is never put in backup files, and nothing can move money with it.</p>
-    <div class="btns">${cancelBtn}<button class="btn">Connect</button></div></form>`);
+    <div class="btns">${cancelBtn}<button class="btn">Connect</button></div>
+
+    <label style="color:var(--text);font-weight:600;font-size:16px;margin-top:18px">Good to know</label>
+    <ul class="small" style="padding-left:20px;margin:6px 0">
+      <li>If SimpleFIN says your bank <b>"isn't responding"</b>, it's usually a temporary problem between SimpleFIN and the bank. Try again in a few hours, or contact SimpleFIN's support if it keeps happening.</li>
+      <li>SimpleFIN gets new information from your bank about once a day, so the balance here can be up to a day behind. You can always enter today's balance from your bank's own app.</li>
+      <li>Bill Planner keeps only a read-only connection key, on this phone only. It's never put in backup files.</li></ul>
+    </form>`);
 }
 function sheetAccounts() {
   const opts = sel => S.bank.accounts.map(a => `<option value="${esc(a.id)}"${a.id === sel ? ' selected' : ''}>${esc(a.name)}${a.org ? ' (' + esc(a.org) + ')' : ''} · ${fm(a.available != null && !isNaN(a.available) ? a.available : a.balance)}</option>`).join('');
