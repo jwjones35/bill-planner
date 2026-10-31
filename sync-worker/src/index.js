@@ -99,8 +99,36 @@ async function sendDue(env) {
 // For the encryption test on the developer's PC (ignored by Cloudflare).
 export const _test = { encryptPush, vapid };
 
+/* Unleaded prices near home, once a day, from Google's gas station listings (Places API "Nearby Search").
+   Needs two Cloudflare secrets: GOOGLE_PLACES_KEY (made by the user in Google Cloud) and HOME_LATLNG ("lat,lng" of
+   the home town; up to about 31 miles around it are searched). Stores the median price of stations that updated
+   their unleaded price in the last 3 days. */
+async function fetchPrices(env, force) {
+  if (!env.GOOGLE_PLACES_KEY || !env.HOME_LATLNG) return { skipped: 'not set up' };
+  const last = await env.DB.prepare("SELECT at FROM prices WHERE area = 'home'").first();
+  if (!force && last && Date.now() - last.at < 20 * 3600000) return { skipped: 'fresh' };
+  const [lat, lng] = String(env.HOME_LATLNG).split(',').map(Number);
+  const r = await fetch('https://places.googleapis.com/v1/places:searchNearby', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': String(env.GOOGLE_PLACES_KEY).replace(/^﻿/, '').trim(), 'X-Goog-FieldMask': 'places.displayName,places.fuelOptions' },
+    body: JSON.stringify({ includedTypes: ['gas_station'], maxResultCount: 20, locationRestriction: { circle: { center: { latitude: lat, longitude: lng }, radius: 50000 } } })
+  });
+  if (!r.ok) return { error: r.status, detail: (await r.text()).slice(0, 300) };
+  const j = await r.json(), cutoff = Date.now() - 3 * 86400000, ps = [];
+  for (const p of j.places || []) for (const f of ((p.fuelOptions || {}).fuelPrices || [])) {
+    if (f.type !== 'REGULAR_UNLEADED' || !f.price) continue;
+    const v = Number(f.price.units || 0) + Number(f.price.nanos || 0) / 1e9;
+    if (v > 1 && v < 10 && (!f.updateTime || Date.parse(f.updateTime) >= cutoff)) ps.push(v);
+  }
+  if (!ps.length) return { error: 'no prices', places: (j.places || []).length };
+  ps.sort((a, b) => a - b);
+  const med = ps.length % 2 ? ps[(ps.length - 1) / 2] : (ps[ps.length / 2 - 1] + ps[ps.length / 2]) / 2;
+  await env.DB.prepare("INSERT OR REPLACE INTO prices (area, price, low, high, stations, at) VALUES ('home', ?, ?, ?, ?, ?)").bind(med, ps[0], ps[ps.length - 1], ps.length, Date.now()).run();
+  return { price: med, stations: ps.length };
+}
+
 export default {
-  async scheduled(event, env, ctx) { ctx.waitUntil(sendDue(env)); },
+  async scheduled(event, env, ctx) { ctx.waitUntil(Promise.all([sendDue(env), fetchPrices(env).catch(() => { })])); },
   async fetch(req, env) {
     if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors(req) });
     const url = new URL(req.url);
@@ -124,7 +152,7 @@ export default {
       }
       return json(req, 405, { error: 'method not allowed' });
     }
-    const m = url.pathname.match(/^\/v1\/h\/([A-Za-z0-9_-]{16,64})(?:\/(sub|sched|test|notify|subs))?$/);
+    const m = url.pathname.match(/^\/v1\/h\/([A-Za-z0-9_-]{16,64})(?:\/(sub|sched|test|notify|subs|fuelprice))?$/);
     if (!m) return json(req, 404, { error: 'not found' });
     const id = m[1];
     const token = (req.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
@@ -165,6 +193,13 @@ export default {
         let sent = 0;
         for (const s of subs.filter(s => !to || s.who === to)) { try { if ((await sendPush(env, s, body.data)) < 300) sent++; } catch (e) { } }
         return json(req, 200, { sent });
+      }
+      // Today's unleaded price near home. ?check=1 fetches now if the stored one is over 20 hours old (or missing).
+      if (m[2] === 'fuelprice' && req.method === 'GET') {
+        let info = null;
+        if (url.searchParams.get('check') === '1') info = await fetchPrices(env).catch(e => ({ error: String(e) }));
+        const p = await env.DB.prepare("SELECT price, low, high, stations, at FROM prices WHERE area = 'home'").first();
+        return json(req, 200, p ? Object.assign({}, p, { info }) : { price: null, info });
       }
       // Which people have a phone set up for notifications (their codes only).
       if (m[2] === 'subs' && req.method === 'GET') {

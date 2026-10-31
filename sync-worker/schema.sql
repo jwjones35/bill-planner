@@ -20,6 +20,15 @@ CREATE TABLE IF NOT EXISTS sched (
   items TEXT NOT NULL,
   updated INTEGER NOT NULL
 );
+-- Today's typical unleaded price near home (public prices from Google; no personal data).
+CREATE TABLE IF NOT EXISTS prices (
+  area TEXT PRIMARY KEY,
+  price REAL,
+  low REAL,
+  high REAL,
+  stations INTEGER,
+  at INTEGER NOT NULL
+);
 -- One-time codes for adding a phone: the encrypted household key, gone after one use or 15 minutes.
 CREATE TABLE IF NOT EXISTS pairs (
   code TEXT PRIMARY KEY,

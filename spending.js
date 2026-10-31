@@ -132,13 +132,58 @@ const fills = vid => (S.fuelQ || []).filter(q => q.answer && !q.answer.none && !
   .map(q => Object.assign({ date: q.date }, q.answer)).sort((a, b) => a.odo - b.odo);
 function recentPrice() {
   // (Answers already flagged for an odd price don't count toward what's normal.)
+  // (Only answers with gallons typed from the pump.)
   const ps = (S.fuelQ || []).filter(q => q.answer && q.answer.gallons && q.answer.fuel && !q.answer.priceOdd && diffDays(q.date, today()) <= 60).map(q => q.answer.fuel / q.answer.gallons).sort((a, b) => a - b);
   return ps.length ? ps[Math.floor(ps.length / 2)] : null;
 }
+/* Today's typical unleaded price within about 30 miles of home (checked once a day by the sync storage, from
+   Google's gas station listings). Kept on this phone for 6 hours between checks. */
+let localPriceCache = null;
+async function loadLocalPrice() {
+  try { const c = JSON.parse(localStorage.getItem('billplanner.localPrice')); if (c && Date.now() - c.got < 6 * HOUR) { localPriceCache = c; return c; } } catch (e) { }
+  const cfg = syncCfg(); if (!cfg) return null;
+  const k = await syncKeys(cfg);
+  const r = await api('GET', `/v1/h/${cfg.id}/fuelprice?check=1`, k.token);
+  if (r.status !== 200 || !r.j || !r.j.price) return localPriceCache;
+  localPriceCache = { price: r.j.price, low: r.j.low, high: r.j.high, stations: r.j.stations, at: r.j.at, got: Date.now() };
+  try { localStorage.setItem('billplanner.localPrice', JSON.stringify(localPriceCache)); } catch (e) { }
+  return localPriceCache;
+}
+const localPrice = () => {
+  if (!localPriceCache) { try { localPriceCache = JSON.parse(localStorage.getItem('billplanner.localPrice')); } catch (e) { } }
+  return localPriceCache && Date.now() - localPriceCache.at < 4 * 86400000 ? localPriceCache.price : null;
+};
+// The price per gallon to judge by: today's local price, or else the usual price from your own fill-ups.
+const refPrice = () => localPrice() || recentPrice();
+// Gallons for an answer: as typed from the pump, or worked out from the fuel cost and the price that day.
+const gallonsOf = a => a.gallons || (a.fuel && a.price ? a.fuel / a.price : 0);
+
+/* Fuel use without odometer readings: over the last 4 weeks, the fuel bought for a vehicle is compared with what
+   its usual daily miles need at its miles per gallon. The margin is generous (35%, plus half a tank for whatever
+   was in the tank at the start) because daily miles are only a guess. An odometer reading entered now and then
+   replaces the guess with the real miles per day. */
+function milesPerDay(v) {
+  const f = fills(v.id);
+  if (f.length >= 2) { const a = f[0], b = f[f.length - 1], days = diffDays(a.date, b.date); if (days >= 7 && b.odo > a.odo) return { mpd: (b.odo - a.odo) / days, real: true }; }
+  return v.milesPerDay ? { mpd: v.milesPerDay, real: false } : null;
+}
+function usageCheck(v) {
+  const m = milesPerDay(v); if (!m) return;
+  const from = addDays(today(), -28);
+  const qs = (S.fuelQ || []).filter(q => q.answer && !q.answer.none && !q.answer.unrecognized && q.answer.vehicle === v.id && q.date >= from);
+  if (qs.length < 2) return;
+  const gal = sum(qs.map(q => gallonsOf(q.answer))), spent = sum(qs.map(q => q.answer.fuel || 0));
+  const mpg = ((v.mpgLow || 18) + (v.mpgHigh || 20)) / 2, need = m.mpd * 28 / mpg;
+  const most = need * 1.35 + (v.tank || 20) * 0.5;
+  if (gal <= most) return;
+  const price = refPrice() || (spent / gal), extra = (gal - need) * price;
+  addFlag(v.id, `Fuel check, ${v.name}: in the last 4 weeks ${fm(spent)} of fuel was reported (about ${gal.toFixed(0)} gallons). ${m.real ? `Its odometer readings show about ${Math.round(m.mpd)} miles a day, which at ${mpg} mpg needs` : `At its usual ${Math.round(m.mpd)} miles a day (a guess) and ${mpg} mpg, it needs`} about ${need.toFixed(0)} gallons: that's about ${fm(extra)} more fuel than expected.${m.real ? '' : ' If it really drives more than that, update its usual miles a day under More › Spending watch.'}`, 'u:' + v.id + ':' + weekStart(today()));
+}
+
 // Real miles per gallon from full-tank to full-tank fill-ups, once there are some.
 function actualMpg(v) {
   const f = fills(v.id); let miles = 0, gal = 0, prev = null;
-  for (const x of f) { if (prev && x.full) { miles += x.odo - prev.odo; gal += sum(f.filter(y => y.odo > prev.odo && y.odo <= x.odo).map(y => y.gallons)); } if (x.full) prev = x; }
+  for (const x of f) { if (prev && x.full) { miles += x.odo - prev.odo; gal += sum(f.filter(y => y.odo > prev.odo && y.odo <= x.odo).map(gallonsOf)); } if (x.full) prev = x; }
   return gal > 3 ? miles / gal : null;
 }
 
@@ -185,11 +230,14 @@ function sheetFuelQ(q, warn) {
     <label for="fqV">Vehicle</label><select id="fqV" name="vehicle">${vs.map(v => `<option value="${v.id}"${(a.vehicle || mineV.id) === v.id ? ' selected' : ''}>${esc(v.name)}${v.driver ? ` (${esc(v.driver)})` : ''}</option>`).join('')}</select>
     <label class="check"><input type="checkbox" name="none" data-act="fqNone"${a.none ? ' checked' : ''}> No fuel, it was all snacks, drinks or other things</label>
     <div data-fq="fuel"${a.none ? ' hidden' : ''}>
-      <p class="hint" style="margin-top:10px"><b>Be exact:</b> copy the numbers from the pump or the receipt. They're checked against the miles driven.</p>
-      <div class="two"><div><label for="fqG">Gallons</label><input id="fqG" name="gallons" inputmode="decimal" placeholder="7.142" value="${a.gallons || ''}"></div>
-      <div><label for="fqF">Fuel cost</label><input id="fqF" name="fuel" inputmode="decimal" placeholder="20.00" value="${a.fuel || ''}"></div></div>
-      <label for="fqO">Odometer right now (miles)</label><input id="fqO" name="odo" inputmode="numeric" placeholder="148326" value="${a.odo || ''}">
-      <label class="check"><input type="checkbox" name="full"${a.full ? ' checked' : ''}> I filled the tank all the way</label>
+      <p class="hint" style="margin-top:10px"><b>Be exact:</b> copy the fuel cost from the pump or the receipt. It's checked against the miles the vehicle usually drives${localPrice() ? ` and today's local price (${fm(localPrice())} a gallon)` : ''}.</p>
+      <label for="fqF">Fuel cost</label><input id="fqF" name="fuel" inputmode="decimal" placeholder="20.00" value="${a.fuel || ''}">
+      <details${a.gallons || a.odo ? ' open' : ''}><summary class="small" style="margin-top:10px;color:var(--brand)">Gallons or odometer (only if you know them)</summary>
+        <div class="two"><div><label for="fqG">Gallons</label><input id="fqG" name="gallons" inputmode="decimal" placeholder="7.142" value="${a.gallons || ''}"></div>
+        <div><label for="fqO">Odometer</label><input id="fqO" name="odo" inputmode="numeric" placeholder="148326" value="${a.odo || ''}"></div></div>
+        <label class="check"><input type="checkbox" name="full"${a.full ? ' checked' : ''}> I filled the tank all the way</label>
+        <p class="hint">Not needed. An odometer reading now and then makes the fuel check more exact.</p>
+      </details>
     </div>
     <div class="fq-rest small" data-fq="rest" data-total="${q.total}"></div>
     <input type="hidden" name="confirm" value="${warn ? '1' : ''}">
@@ -249,20 +297,30 @@ function submitFuelQ(f) {
   q.draft = { vehicle: a.vehicle, none, gallons: fd.get('gallons'), fuel: fd.get('fuel'), odo: fd.get('odo'), full: fd.get('full') === 'on' };
   const warns = [];
   if (!none) {
-    a.gallons = num(fd.get('gallons')); a.fuel = num(fd.get('fuel')); a.odo = parseInt(String(fd.get('odo') || '').replace(/[^\d]/g, ''), 10); a.full = fd.get('full') === 'on';
-    if (!(a.gallons > 0)) return err('Enter the gallons from the pump, for example 7.142.', 'gallons');
-    if (!(a.fuel > 0)) return err('Enter the fuel cost from the pump.', 'fuel');
+    a.fuel = num(fd.get('fuel'));
+    a.gallons = num(fd.get('gallons')) || null;
+    a.odo = parseInt(String(fd.get('odo') || '').replace(/[^\d]/g, ''), 10) || null;
+    a.full = fd.get('full') === 'on';
+    a.price = refPrice() ? Math.round(refPrice() * 1000) / 1000 : null; // the price that day, to work out gallons
+    if (!(a.fuel > 0)) return err('Enter the fuel cost from the pump or the receipt.', 'fuel');
     if (a.fuel > q.total + 0.01) return err(`The fuel cost can't be more than the whole purchase (${fm(q.total)}).`, 'fuel');
-    if (!(a.odo > 0)) return err('Enter the odometer reading (the miles on the dashboard).', 'odo');
-    if (v && v.tank && a.gallons > v.tank + 0.5) return err(`That's more than the ${v.name}'s tank holds (${v.tank} gallons). Check the pump numbers.`, 'gallons');
-    const prev = v ? fills(v.id).filter(x => x !== a) : [];
-    const last = prev.length ? prev[prev.length - 1].odo : null;
-    if (last != null && a.odo < last) return err(`The odometer is lower than the last fill-up for the ${v.name} (${last.toLocaleString()} miles). Check the number.`, 'odo');
-    if (last != null && a.odo - last > 1500) warns.push(`That's ${(a.odo - last).toLocaleString()} miles since the last fill-up reported for the ${v.name}.`);
-    const ppg = a.fuel / a.gallons, avg = recentPrice();
-    if (avg ? (ppg > avg * 1.12 + 0.10 || ppg < avg * 0.88 - 0.10) : (ppg < 1.5 || ppg > 6)) {
-      warns.push(`That works out to ${fm(ppg)} a gallon${avg ? `, but recent fill-ups were about ${fm(avg)} a gallon` : ''}.`);
-      a.priceOdd = Math.round(ppg * 1000) / 1000; a.usualPrice = avg ? Math.round(avg * 1000) / 1000 : null;
+    // More fuel than the tank can hold (typed gallons, or the cost at today's price).
+    const gal = gallonsOf(a);
+    if (v && v.tank && gal > v.tank + 0.5) return err(a.gallons ? `That's more than the ${v.name}'s tank holds (${v.tank} gallons). Check the pump numbers.`
+      : `At about ${fm(a.price)} a gallon, ${fm(a.fuel)} would be ${gal.toFixed(1)} gallons: more than the ${v.name}'s tank holds (${v.tank}). Check the fuel cost.`, a.gallons ? 'gallons' : 'fuel');
+    if (a.odo) {
+      const prev = v ? fills(v.id) : [];
+      const last = prev.length ? prev[prev.length - 1].odo : null;
+      if (last != null && a.odo < last) return err(`The odometer is lower than the last reading for the ${v.name} (${last.toLocaleString()} miles). Check the number, or leave it empty.`, 'odo');
+      if (last != null && a.odo - last > 3000) warns.push(`That's ${(a.odo - last).toLocaleString()} miles since the last odometer reading for the ${v.name}.`);
+    }
+    // Typed gallons: does the price per gallon match what fuel costs around here?
+    if (a.gallons) {
+      const ppg = a.fuel / a.gallons, ref = refPrice();
+      if (ref ? (ppg > ref * 1.12 + 0.10 || ppg < ref * 0.88 - 0.10) : (ppg < 1.5 || ppg > 6)) {
+        warns.push(`That works out to ${fm(ppg)} a gallon${ref ? `, but unleaded around here is about ${fm(ref)} a gallon` : ''}.`);
+        a.priceOdd = Math.round(ppg * 1000) / 1000; a.usualPrice = ref ? Math.round(ref * 1000) / 1000 : null;
+      }
     }
   }
   if (warns.length && fd.get('confirm') !== '1') { sheetFuelQ(q, warns.join(' ') + ' Check the numbers. If they are right, send them anyway.'); return; }
@@ -270,7 +328,7 @@ function submitFuelQ(f) {
   q.answer = a; q.assigned = q.assigned || me();
   rememberCard(q, me());
   if (a.priceOdd) addFlag(v && v.id, `${me()} reported ${fm(a.fuel)} of fuel for ${a.gallons} gallons at ${q.merchant} on ${nice(q.date)}: ${fm(a.priceOdd)} a gallon, which is unusual${a.usualPrice ? ` (recent fill-ups: about ${fm(a.usualPrice)} a gallon)` : ''}. Some of it may not have been fuel.`, 'p:' + q.id);
-  if (v && !none) mileageCheck(v);
+  if (v && !none) { mileageCheck(v); usageCheck(v); }
   save(); spendAlerts(); closeSheet(true); render();
   toast(none ? 'Thanks. It counts as snacks and drinks.' : `Thanks. ${fm(a.fuel)} fuel, ${fm(Math.max(0, q.total - a.fuel))} snacks and drinks.`);
   setTimeout(showFuelQuestion, 400);
@@ -282,10 +340,10 @@ function mileageCheck(v) {
   if (fulls.length < 2) return;
   const b = fulls[fulls.length - 1], aF = fulls[fulls.length - 2];
   const miles = b.odo - aF.odo; if (miles <= 0) return;
-  const gal = sum(f.filter(y => y.odo > aF.odo && y.odo <= b.odo).map(y => y.gallons));
+  const gal = sum(f.filter(y => y.odo > aF.odo && y.odo <= b.odo).map(gallonsOf));
   const most = miles / (v.mpgLow || 18) * 1.15 + 0.5;
   if (gal <= most) return;
-  const extra = gal - miles / (v.mpgLow || 18), price = recentPrice() || (b.fuel / b.gallons);
+  const extra = gal - miles / (v.mpgLow || 18), price = refPrice() || (b.fuel / gallonsOf(b));
   addFlag(v.id, `Fuel check, ${v.name}: between ${nice(aF.date)} and ${nice(b.date)} it drove ${miles.toLocaleString()} miles, which needs at most about ${most.toFixed(1)} gallons at ${v.mpgLow || 18} mpg (with 15% to spare). The fill-ups reported come to ${gal.toFixed(1)} gallons: about ${fm(extra * price)} more fuel than the miles explain.`, 'm:' + v.id + ':' + b.odo);
 }
 function addFlag(vehicle, text, key) {
@@ -313,6 +371,7 @@ const sentOnce = k => { S.sentAlerts = S.sentAlerts || []; if (S.sentAlerts.incl
 async function spendAlerts() {
   if (!S || !syncLinked() || typeof notifyNow !== 'function') return;
   const m = me(), out = [];
+  for (const v of vehicles()) usageCheck(v); // 4-week fuel vs usual miles, re-checked as days pass
   for (const q of openQs()) {
     const to = q.assigned ? [q.assigned] : people().filter(n => !(q.notMe || []).some(x => sameName(x, n)));
     for (const n of to) if (!sameName(n, m) && sentOnce(`ask:${q.id}:${n}`))
@@ -370,7 +429,8 @@ function spendMoreHtml() {
   const vs = vehicles(), cards = recentCards(), L = limits();
   return `<h2>Spending watch</h2><div class="card">
     <button class="row" data-act="spLimits"><span class="main"><div class="name">Weekly limits</div><div class="sub">${FUN_CATS.map(c => `${CATS[c].name} ${fm(L[c])}`).join(' · ')}</div></span></button>
-    ${vs.map(v => { const a = actualMpg(v); return `<button class="row" data-act="spVehicle" data-id="${v.id}"><span class="main"><div class="name">${esc(v.name)}</div><div class="sub">${v.driver ? esc(v.driver) + ' · ' : ''}${v.mpgLow}-${v.mpgHigh} mpg${a ? ` · actual ${a.toFixed(1)} mpg` : ''} · ${v.tank} gal tank</div></span></button>`; }).join('')}
+    <div class="row" style="cursor:default"><span class="main"><div class="name">Unleaded near home</div><div class="sub">${localPrice() ? `${fm(localPrice())} a gallon (typical of ${localPriceCache.stations} stations within about 30 miles, ${whenText(localPriceCache.at)})` : 'Not available yet. Checked once a day from Google\'s gas station listings.'}</div></span></div>
+    ${vs.map(v => { const a = actualMpg(v), m = milesPerDay(v); return `<button class="row" data-act="spVehicle" data-id="${v.id}"><span class="main"><div class="name">${esc(v.name)}</div><div class="sub">${v.driver ? esc(v.driver) + ' · ' : ''}${v.mpgLow}-${v.mpgHigh} mpg${a ? ` (actual ${a.toFixed(1)})` : ''} · ${v.tank} gal tank${m ? ` · about ${Math.round(m.mpd)} miles a day${m.real ? ' (from odometer)' : ''}` : ''}</div></span></button>`; }).join('')}
     <button class="row" data-act="spVehicle"><span class="main"><div class="name">+ Add a vehicle</div><div class="sub">${vs.length ? 'Another vehicle' : 'Turns on the gas-station questions and the fuel check'}</div></span></button>
     ${cards.map(c => `<button class="row" data-act="spCard" data-id="${c}"><span class="main"><div class="name">Card ending ${c}</div><div class="sub">${(S.cards || {})[c] ? esc(S.cards[c]) + "'s card" : 'Whose card is this? Tap to choose'}</div></span></button>`).join('')}
   </div>`;
@@ -389,7 +449,8 @@ function sheetVehicle(v) {
     <div class="two"><div><label for="vLo">Miles per gallon, low</label><input id="vLo" name="mpgLow" inputmode="decimal" value="${x.mpgLow || ''}"></div>
     <div><label for="vHi">high</label><input id="vHi" name="mpgHigh" inputmode="decimal" value="${x.mpgHigh || ''}"></div></div>
     <label for="vTank">Fuel tank size (gallons)</label><input id="vTank" name="tank" inputmode="decimal" value="${x.tank || ''}" placeholder="For example: 19">
-    <p class="hint">Used to check fuel answers: a fill-up can't be bigger than the tank, and the gallons bought should match the miles driven.</p>
+    <label for="vMpd">Miles driven on a usual day</label><input id="vMpd" name="milesPerDay" inputmode="numeric" value="${x.milesPerDay || ''}" placeholder="For example: 40">
+    <p class="hint">A rough guess is fine: work and back, errands, averaged over the week. Used to check fuel answers: a fill-up can't be bigger than the tank, and the fuel bought each month should roughly match the miles driven. If anyone ever enters an odometer reading, the real miles replace this guess.</p>
     <div class="btns">${cancelBtn}<button class="btn">Save</button></div>
     ${v ? `<div class="btns"><button type="button" class="btn danger" data-act="spVehicleDel" data-id="${v.id}">Remove vehicle</button></div>` : ''}</form>`);
 }
@@ -426,7 +487,9 @@ function spendSubmit(f) {
     const lo = num(fd.get('mpgLow')), hi = num(fd.get('mpgHigh')), tank = num(fd.get('tank'));
     if (!(lo > 3 && hi >= lo)) { formError(f, 'Enter the miles per gallon, low and high (for example 18 and 20).', 'mpgLow'); return true; }
     if (!(tank > 3)) { formError(f, 'Enter the fuel tank size in gallons.', 'tank'); return true; }
-    const o = { name, driver: fd.get('driver') || null, mpgLow: lo, mpgHigh: hi, tank };
+    const mpd = num(fd.get('milesPerDay'));
+    if (!(mpd > 0)) { formError(f, 'Enter a rough guess of the miles driven on a usual day (for example 40).', 'milesPerDay'); return true; }
+    const o = { name, driver: fd.get('driver') || null, mpgLow: lo, mpgHigh: hi, tank, milesPerDay: mpd };
     S.vehicles = vehicles();
     if (f.dataset.id) Object.assign(findV(f.dataset.id), o); else S.vehicles = S.vehicles.concat([Object.assign({ id: uid() }, o)]);
     if (!S.fuelSince) S.fuelSince = today(); // questions start with purchases from today on

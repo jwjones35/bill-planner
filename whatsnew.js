@@ -4,6 +4,14 @@
    Every release adds an entry here, in plain words: added, changed, fixed, removed. */
 const CHANGELOG = [
   {
+    v: '2.1.0', date: '2026-10-31',
+    added: ['Today\'s unleaded price within about 30 miles of home is checked once a day (from Google\'s gas station listings). See it under More › Spending watch.',
+      'Each vehicle has a "miles driven on a usual day" guess, used to check that the fuel bought over 4 weeks matches the driving.'],
+    changed: ['The gas-station question only needs the fuel cost now. Gallons are worked out from the local price, and gallons and the odometer are optional.',
+      'An odometer reading entered now and then replaces the miles-a-day guess with the real miles.'],
+    removed: ['Having to type the gallons and the odometer every time.']
+  },
+  {
     v: '2.0.1', date: '2026-10-31',
     added: ['If notifications aren\'t on for this phone, a pop-up offers a one-button setup each time the app opens.',
       'If they were turned off in iPhone Settings, the pop-up says exactly where to turn them back on.',

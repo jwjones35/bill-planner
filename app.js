@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's available to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '2.0.1';
+const APP_VERSION = '2.1.0';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -2147,7 +2147,7 @@ async function refreshAll() {
   if (!S) return;
   // Spending watch: send any questions and alerts that are due, and show this phone's own question.
   try { await spendAlerts(); } catch (e) { }
-  if (syncLinked()) { try { await syncNow(); await checkPhones(); await notifyOthersOff(); } catch (e) { } }
+  if (syncLinked()) { try { await syncNow(); await checkPhones(); await notifyOthersOff(); await loadLocalPrice(); } catch (e) { } }
   render();
   // A gas-station question comes first; otherwise, if this phone's notifications are off, offer to turn them on.
   if (!showFuelQuestion()) { try { await notifyPrompt(); } catch (e) { } }
