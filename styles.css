@@ -92,6 +92,22 @@ button.card.row { border-top: 0; }
 .status-bad { background: var(--bad-bg); border-color: var(--bad); }
 .status-bad .status-dot { background: var(--bad); } .status-bad .status-title { color: var(--bad); }
 
+/* "What's new" after an update */
+.wn-splash { text-align: center; padding: 6px 0 4px; }
+.wn-badge { display: inline-block; padding: 3px 12px; border-radius: 999px; font-size: 12px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--brand-ink); background: linear-gradient(90deg, var(--brand), var(--brand-2)); }
+.wn-splash h3 { font-size: 22px !important; margin: 10px 0 0 !important; }
+.wn-ver { background: var(--chip); border-radius: 12px; padding: 10px 12px; margin-top: 10px; }
+.wn-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.wn-part { margin-top: 6px; }
+.wn-part ul { margin: 4px 0 0; padding-left: 20px; }
+.wn-part li { margin: 3px 0; font-size: 15px; }
+.wn-tag { display: inline-block; font-size: 11px; font-weight: 700; padding: 1px 8px; border-radius: 6px; text-transform: uppercase; letter-spacing: .04em; }
+.wn-new { background: var(--good-bg); color: var(--good); }
+.wn-chg { background: color-mix(in srgb, var(--brand-2) 18%, transparent); color: var(--brand-2); }
+.wn-fix { background: var(--warn-bg); color: var(--warn); }
+.wn-rem { background: var(--bad-bg); color: var(--bad); }
+
 /* Hero: safe to spend */
 .hero {
   padding: 18px 16px 14px;

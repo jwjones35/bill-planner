@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's available to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '1.9.1';
+const APP_VERSION = '1.9.2';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -1198,6 +1198,7 @@ function viewMore() {
     <div class="sub">${pr && pr.name ? 'This phone · tap to change' : 'Tap to add your name, so your own paychecks show as "Me"'}</div></span></button></div>
   ${syncCardHtml()}
   ${notifyCardHtml()}
+  <h2>About</h2><div class="card"><button class="row" data-act="whatsNew"><span class="main"><div class="name">What's new</div><div class="sub">Version ${APP_VERSION} · see what changed in each update</div></span></button></div>
   <h2>Bank connection</h2><div class="card">${bankAccess()
     ? `<div class="pad"><div><b>${bankOn() ? `Connected to ${esc(bankName())}` : 'Connected, waiting for the first update'}</b></div>
         <div class="small muted">${bankBusy ? 'Updating now...' : S.bank.fetchedAt ? `${S.bank.bal ? bankAgeText() + '. ' : ''}SimpleFIN gets new data from the bank about once a day; the app checks for it every hour while open (last checked ${timeAgo(S.bank.fetchedAt)}).` : 'Not updated yet.'}</div>
@@ -1809,6 +1810,7 @@ document.addEventListener('click', e => {
       save(); render(); toast("OK. No more warnings for this one; it's still counted until the bank shows it."); break;
     }
     case 'profile': sheetProfile(false); break;
+    case 'whatsNew': sheetWhatsNew(); break;
     case 'profilePick': {
       const f = document.getElementById('fProfile'); if (!f) break;
       f.elements.name.value = el.dataset.name;
@@ -2130,8 +2132,9 @@ window.addEventListener('online', () => { if (syncLinked()) syncNow(); });
 render();
 syncTakeSnap();
 refreshAll(); // the bank updates if connected and the last update is over an hour old
-// The one-time "Whose phone is this?" question, once there are paychecks to label.
-if (S && S.incomes.length) setTimeout(askProfileOnce, 600);
+// Right after an update: "What's new". Otherwise the one-time "Whose phone is this?" question, once there are
+// paychecks to label.
+setTimeout(() => { if (!showWhatsNewIfUpdated() && S && S.incomes.length) askProfileOnce(); }, 600);
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => { });
 if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === '127.0.0.1' || location.hostname === 'localhost')) {
   // When a new version of the app takes over, reload once so it shows straight away.
