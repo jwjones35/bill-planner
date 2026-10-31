@@ -2017,7 +2017,7 @@ document.addEventListener('submit', e => {
       if (!name || isMeWord(name)) { formError(f, 'Type your first name, so other phones can tell your paychecks apart.', 'name'); return; }
       const old = profile() || {};
       // Paychecks marked "Me" become this name. Renaming yourself (Jim to Jimmy) renames your paychecks too, but
-      // picking someone who already has paychecks (this is really Daoma's phone) renames nothing.
+      // picking someone who already has paychecks (this is really the other person's phone) renames nothing.
       const renameMe = old.name && !sameName(old.name, name) && !S.incomes.some(i => sameName(i.owner, name));
       for (const i of S.incomes) if (isMeWord(i.owner) || (renameMe && sameName(i.owner, old.name))) i.owner = name;
       setProfile({ name });
