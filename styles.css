@@ -93,7 +93,8 @@ button.card.row { border-top: 0; }
 .row:first-child { border-top: 0; }
 .row:active { background: var(--chip); }
 .row .main { flex: 1; min-width: 0; }
-.row .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Long names wrap onto a second line instead of being cut off */
+.row .name { font-weight: 600; overflow-wrap: anywhere; }
 .row .sub { color: var(--muted); font-size: 13px; }
 .row .amt { font-weight: 600; text-align: right; white-space: nowrap; }
 .row .amt .sub { font-weight: 400; }

@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's safe to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '1.0.6';
+const APP_VERSION = '1.0.7';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -336,7 +336,7 @@ function viewPay() {
 function incRow(p) {
   return `<button class="row" data-act="recv" data-id="${p.inc.id}" data-d="${p.d}">
     <span class="dot ${p.r ? 'paid' : p.d < today() ? 'soon' : 'ok'}"></span>
-    <span class="main"><div class="name">${esc(p.inc.name)}${p.inc.owner ? ` <span class="tag">${esc(p.inc.owner)}</span>` : ''}</div><div class="sub">${nice(p.d)} · ${p.r ? 'received' : p.d < today() ? 'tap to confirm' : rel(p.d)}</div></span>
+    <span class="main"><div class="name">${esc(p.inc.name)}</div><div class="sub">${p.inc.owner ? `<b>${esc(p.inc.owner)}</b> · ` : ''}${nice(p.d)} · ${p.r ? 'received' : p.d < today() ? 'tap to confirm' : rel(p.d)}</div></span>
     <span class="amt num">${p.est ? '~' : ''}${fm(p.amt)}</span></button>`;
 }
 
@@ -500,7 +500,7 @@ function sheetBill(b) {
 // List of all paychecks, opened from the Paydays tab.
 function sheetIncomes() {
   openSheet(`<h3>Paychecks</h3><p class="hint">Tap one to change its name, whose it is, schedule or usual amount.</p>
-    <div class="card" style="margin-top:10px">${S.incomes.map(i => `<button class="row" data-act="editInc" data-id="${i.id}"><span class="main"><div class="name">${esc(i.name)}${i.owner ? ` <span class="tag">${esc(i.owner)}</span>` : ''}${i.active === false ? ' <span class="tag">stopped</span>' : ''}</div><div class="sub">${freqText(i)}${i.varies ? ' · varies' : ''}</div></span><span class="amt num">${incAmt(i).est ? '~' : ''}${fm(incAmt(i).v)}</span></button>`).join('') || '<div class="empty">No paychecks yet.</div>'}</div>
+    <div class="card" style="margin-top:10px">${S.incomes.map(i => `<button class="row" data-act="editInc" data-id="${i.id}"><span class="main"><div class="name">${esc(i.name)}${i.active === false ? ' <span class="tag">stopped</span>' : ''}</div><div class="sub">${i.owner ? `<b>${esc(i.owner)}</b> · ` : ''}${freqText(i)}${i.varies ? ' · amount varies' : ''}</div></span><span class="amt num">${incAmt(i).est ? '~' : ''}${fm(incAmt(i).v)}</span></button>`).join('') || '<div class="empty">No paychecks yet.</div>'}</div>
     <div class="btns"><button class="btn ghost" data-act="close">Done</button><button class="btn" data-act="editInc">+ Add paycheck</button></div>`);
 }
 function sheetInc(i) {
