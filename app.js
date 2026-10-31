@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's safe to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '1.0.5';
+const APP_VERSION = '1.0.6';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -28,6 +28,7 @@ const firstOfMonth = s => s.slice(0, 8) + '01';
 const WD = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const WDL = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const MO = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const MONTHL = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 const nice = s => { const d = new Date(parseD(s)); return `${WD[d.getUTCDay()]} ${MO[d.getUTCMonth()]} ${d.getUTCDate()}`; };
 const monthName = s => { const [y, m] = s.split('-').map(Number); return `${MO[m - 1]} ${y}`; };
 function rel(s) {
@@ -269,15 +270,15 @@ function viewHome() {
   }
 
   const overdue = dueList(lookback(), t);
-  if (overdue.length) h += section('Overdue', overdue, '');
+  if (overdue.length) h += section('Overdue bills', overdue, '');
   const wkEnd = addDays(t, 7);
-  h += section('This week', dueList(t, wkEnd), 'Nothing due in the next 7 days.');
+  h += section('Bills due this week', dueList(t, wkEnd), 'No bills due in the next 7 days.');
   const fonm = firstOfNextMonth(t);
-  if (wkEnd < fonm) h += section(`Rest of ${MO[Number(t.slice(5, 7)) - 1]}`, dueList(wkEnd, fonm), 'Nothing else due this month.');
+  if (wkEnd < fonm) h += section(`Bills due later in ${MONTHL[Number(t.slice(5, 7)) - 1]}`, dueList(wkEnd, fonm), 'No other bills due this month.');
   const nmStart = wkEnd > fonm ? wkEnd : fonm;
-  h += section(`${monthName(fonm).split(' ')[0]} (next month)`, dueList(nmStart, firstOfNextMonth(fonm)), 'Nothing due.', true);
+  h += section(`Bills due in ${MONTHL[Number(fonm.slice(5, 7)) - 1]}`, dueList(nmStart, firstOfNextMonth(fonm)), 'No bills due.', true);
   const paidThisMonth = dueList(firstOfMonth(t), fonm, false).filter(x => x.p);
-  if (paidThisMonth.length) h += section('Paid this month', paidThisMonth, '', true);
+  if (paidThisMonth.length) h += section('Bills paid this month', paidThisMonth, '', true);
 
   for (const info of S.infos) h += infoCard(info);
   if (!S.bills.length) h += `<div class="banner warn">No bills yet. Add them on the <a href="#" data-act="tab" data-tab="bills">Bills</a> tab, or restore a backup file from More.</div>`;
