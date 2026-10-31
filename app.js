@@ -236,7 +236,7 @@ function billRow(x) {
   const late = !x.p && x.d < t;
   const soon = !x.p && !late && diffDays(t, x.d) <= 3;
   const dot = x.p ? 'paid' : late ? 'late' : soon ? 'soon' : 'ok';
-  const sub = x.p ? `Paid ${nice(x.p.paidOn || x.d)}` : `${nice(x.d)} Â· ${rel(x.d)}`;
+  const sub = x.p ? `Paid ${nice(x.p.paidOn || x.d)}` : `${nice(x.d)} · ${rel(x.d)}`;
   return `<button class="row${x.p ? ' done' : ''}" data-act="pay" data-id="${x.b.id}" data-d="${x.d}">
     <span class="dot ${dot}"></span>
     <span class="main"><div class="name">${esc(x.b.name)}</div><div class="sub">${sub}</div></span>
@@ -262,13 +262,13 @@ function viewHome() {
     <div class="label">Available to spend ${c.hasPay ? `until payday, ${nice(c.np)}` : 'for the next 2 weeks'}</div>
     <div class="big num ${c.safe < 0 ? 'neg' : ''}">${fm(c.safe)}</div>
     <div class="small muted">Checking minus the bills due before payday.${nw ? ' Next week is checked below.' : ' Bills after payday are not included, so keep some back for next week.'}</div>
-    <div class="small muted" style="margin-top:4px">${stale} Â· <a href="#" data-act="balances">Update</a></div>
+    <div class="small muted" style="margin-top:4px">${stale} · <a href="#" data-act="balances">Update</a></div>
     ${c.everyday ? `<div class="small muted" style="margin-top:4px">Usual everyday spending until then: about ${fm(c.everyday)} <span class="tag">not subtracted</span></div>` : ''}
     <details><summary>How this is worked out</summary>
       <div class="breakdown num">
         <div><span>Checking${bal.pending ? ' (after pending payments)' : ''}</span><span>${fm(bal.checking)}</span></div>
-        <div><span>Bills due before payday (${c.bills.length})</span><span>âˆ’${fm(c.billsTotal)}</span></div>
-        ${c.aside ? `<div><span>Set aside</span><span>âˆ’${fm(c.aside)}</span></div>` : ''}
+        <div><span>Bills due before payday (${c.bills.length})</span><span>−${fm(c.billsTotal)}</span></div>
+        ${c.aside ? `<div><span>Set aside</span><span>−${fm(c.aside)}</span></div>` : ''}
         <div class="sum"><span>Available to spend</span><span>${fm(c.safe)}</span></div>
         ${bal.savings ? `<div class="muted"><span>Savings (not counted)</span><span>${fm(bal.savings)}</span></div>` : ''}
       </div></details>
@@ -316,9 +316,9 @@ function infoCard(info) {
     const step = info.freq === 'monthly' ? 30.44 : info.freq === 'biweekly' ? 14 : 7;
     const left = Math.max(0, Math.ceil(diffDays(today(), end) / step));
     line = `About <b>${left}</b> payment${left === 1 ? '' : 's'} left, ending ${monthName(info.endMonth + '-01')}.`;
-  } else line = 'Add the end month (More â€º Info) to see a countdown.';
+  } else line = 'Add the end month (More › Info) to see a countdown.';
   return `<button class="card row" style="margin-top:22px" data-act="editInfo" data-id="${info.id}">
-    <span class="main"><div class="name">${esc(info.name)}</div><div class="sub">${info.amount ? fm(info.amount) + ' ' + (info.freq === 'monthly' ? 'a month' : info.freq === 'biweekly' ? 'every 2 weeks' : 'a week') + ' Â· ' : ''}${esc(info.note || 'For information only, not counted as a bill')}</div><div class="sub">${line}</div></span></button>`;
+    <span class="main"><div class="name">${esc(info.name)}</div><div class="sub">${info.amount ? fm(info.amount) + ' ' + (info.freq === 'monthly' ? 'a month' : info.freq === 'biweekly' ? 'every 2 weeks' : 'a week') + ' · ' : ''}${esc(info.note || 'For information only, not counted as a bill')}</div><div class="sub">${line}</div></span></button>`;
 }
 
 function viewPay() {
@@ -346,21 +346,21 @@ function viewPay() {
       ${p.incs.map(x => incRow(x)).join('')}
       <div class="lines num">
         <div><span>Paychecks</span><span>${p.incs.some(x => x.est) ? '~' : ''}${fm(p.inTot)}</span></div>
-        <div><span>Bills (${p.bills.length})</span><span>âˆ’${fm(p.bt)}</span></div>
-        <div><span>Everyday spending</span><span>âˆ’${fm(p.ev)}</span></div>
+        <div><span>Bills (${p.bills.length})</span><span>−${fm(p.bt)}</span></div>
+        <div><span>Everyday spending</span><span>−${fm(p.ev)}</span></div>
         <div class="sum"><span>${short ? 'Short by' : 'Left over'}</span><span class="${short ? 'neg' : 'pos'}">${fm(Math.abs(p.left))}</span></div>
         <div class="muted"><span>Expected cushion after</span><span class="${p.run < 0 ? 'neg' : ''}">${fm(p.run)}</span></div>
       </div>
       ${p.bills.length ? `<details><summary>Show the ${p.bills.length} bill${p.bills.length === 1 ? '' : 's'}</summary>${p.bills.map(billRow).join('')}</details>` : ''}
     </div>`;
   }
-  h += `<p class="small muted" style="margin:14px 4px">"Expected cushion" is a forecast: what's available to spend now, minus usual everyday spending, plus each paycheck, minus bills. Set everyday spending to 0 under More â€º Planning to leave it out. ~ means an estimate.</p>`;
+  h += `<p class="small muted" style="margin:14px 4px">"Expected cushion" is a forecast: what's available to spend now, minus usual everyday spending, plus each paycheck, minus bills. Set everyday spending to 0 under More › Planning to leave it out. ~ means an estimate.</p>`;
   return h;
 }
 function incRow(p) {
   return `<button class="row" data-act="recv" data-id="${p.inc.id}" data-d="${p.d}">
     <span class="dot ${p.r ? 'paid' : p.d < today() ? 'soon' : 'ok'}"></span>
-    <span class="main"><div class="name">${esc(p.inc.name)}</div><div class="sub">${p.inc.owner ? `<b>${esc(p.inc.owner)}</b> Â· ` : ''}${nice(p.d)} Â· ${p.r ? 'received' : p.d < today() ? 'tap to confirm' : rel(p.d)}</div></span>
+    <span class="main"><div class="name">${esc(p.inc.name)}</div><div class="sub">${p.inc.owner ? `<b>${esc(p.inc.owner)}</b> · ` : ''}${nice(p.d)} · ${p.r ? 'received' : p.d < today() ? 'tap to confirm' : rel(p.d)}</div></span>
     <span class="amt num">${p.est ? '~' : ''}${fm(p.amt)}</span></button>`;
 }
 
@@ -381,7 +381,7 @@ function viewBills() {
     return `<button class="row" data-act="editBill" data-id="${b.id}">
       <span class="dot ${b.active === false ? '' : 'ok'}"></span>
       <span class="main"><div class="name">${esc(b.name)}${b.varies ? ' <span class="tag">varies</span>' : ''}${b.active === false ? ' <span class="tag">stopped</span>' : ''}</div>
-      <div class="sub">${freqText(b)}${next ? ' Â· next ' + nice(next.d) : ''}</div></span>
+      <div class="sub">${freqText(b)}${next ? ' · next ' + nice(next.d) : ''}</div></span>
       <span class="amt num">${a.unknown ? '<span class="tag warn">amount?</span>' : (a.est ? '~' : '') + fm(a.v)}</span></button>`;
   }).join('') : `<div class="empty">No bills yet. Tap + Add.</div>`;
   return h + `</div>`;
@@ -455,14 +455,14 @@ function sheetPay(b, d) {
   const p = paidRec(b, d);
   const a = billAmt(b);
   if (p) {
-    openSheet(`<h3>${esc(b.name)}</h3><p class="muted">Due ${nice(d)} Â· paid ${nice(p.paidOn || d)}</p>
+    openSheet(`<h3>${esc(b.name)}</h3><p class="muted">Due ${nice(d)} · paid ${nice(p.paidOn || d)}</p>
       <p style="font-size:28px;font-weight:700" class="num">${fm(p.amount)}</p>
       ${p.adjusted ? `<p class="hint">Marking it unpaid adds ${fm(p.amount)} back to your checking balance.</p>` : ''}
       <div class="btns">${cancelBtn}<button class="btn danger" data-act="unpay" data-id="${b.id}" data-d="${d}">Mark not paid</button></div>`);
     return;
   }
   openSheet(`<form id="fPay" data-id="${b.id}" data-d="${d}">
-    <h3>${esc(b.name)}</h3><p class="muted">Due ${nice(d)} Â· ${rel(d)}</p>
+    <h3>${esc(b.name)}</h3><p class="muted">Due ${nice(d)} · ${rel(d)}</p>
     <div class="two"><div><label for="pAmt">Amount paid</label><input id="pAmt" name="amount" inputmode="decimal" value="${a.unknown ? '' : money2(a.v)}" placeholder="0.00" required></div>
     <div><label for="pOn">Paid on</label><input id="pOn" name="paidOn" type="date" value="${today()}" required></div></div>
     ${a.est ? `<p class="hint">The amount is an estimate. Change it to what you really paid.</p>` : ''}
@@ -473,7 +473,7 @@ function sheetPay(b, d) {
 function sheetRecv(inc, d) {
   const r = rcptRec(inc, d);
   if (r) {
-    openSheet(`<h3>${esc(inc.name)}</h3><p class="muted">${nice(d)} Â· received</p><p style="font-size:28px;font-weight:700" class="num">${fm(r.amount)}</p>
+    openSheet(`<h3>${esc(inc.name)}</h3><p class="muted">${nice(d)} · received</p><p style="font-size:28px;font-weight:700" class="num">${fm(r.amount)}</p>
       <div class="btns">${cancelBtn}<button class="btn danger" data-act="unrecv" data-id="${inc.id}" data-d="${d}">Mark not received</button></div>`);
     return;
   }
@@ -524,7 +524,7 @@ function sheetBill(b) {
 // List of all paychecks, opened from the Paydays tab.
 function sheetIncomes() {
   openSheet(`<h3>Paychecks</h3><p class="hint">Tap one to change its name, whose it is, schedule or usual amount.</p>
-    <div class="card" style="margin-top:10px">${S.incomes.map(i => `<button class="row" data-act="editInc" data-id="${i.id}"><span class="main"><div class="name">${esc(i.name)}${i.active === false ? ' <span class="tag">stopped</span>' : ''}</div><div class="sub">${i.owner ? `<b>${esc(i.owner)}</b> Â· ` : ''}${freqText(i)}${i.varies ? ' Â· amount varies' : ''}</div></span><span class="amt num">${incAmt(i).est ? '~' : ''}${fm(incAmt(i).v)}</span></button>`).join('') || '<div class="empty">No paychecks yet.</div>'}</div>
+    <div class="card" style="margin-top:10px">${S.incomes.map(i => `<button class="row" data-act="editInc" data-id="${i.id}"><span class="main"><div class="name">${esc(i.name)}${i.active === false ? ' <span class="tag">stopped</span>' : ''}</div><div class="sub">${i.owner ? `<b>${esc(i.owner)}</b> · ` : ''}${freqText(i)}${i.varies ? ' · amount varies' : ''}</div></span><span class="amt num">${incAmt(i).est ? '~' : ''}${fm(incAmt(i).v)}</span></button>`).join('') || '<div class="empty">No paychecks yet.</div>'}</div>
     <div class="btns"><button class="btn ghost" data-act="close">Done</button><button class="btn" data-act="editInc">+ Add paycheck</button></div>`);
 }
 function sheetInc(i) {
@@ -580,7 +580,7 @@ function sheetBalances() {
     <label for="cBal">Checking, as your bank shows it</label><input id="cBal" name="checking" inputmode="decimal" value="${pend.length ? '' : money2(S.balances.checking)}" placeholder="0.00" required>
     ${pend.length ? `<label>Paid in the app but not showing in the bank yet?</label>
       <p class="hint" style="margin-top:0">Payments can take 3-5 business days to post. Ticked ones are subtracted from the bank's number. Untick any that already show in your bank.</p>
-      ${pend.map(p => { const b = S.bills.find(x => x.id === p.billId); return `<label class="check"><input type="checkbox" name="pend" value="${esc(p.billId + '|' + p.due)}"${diffDays(p.paidOn, today()) <= 7 ? ' checked' : ''}> ${esc(b ? b.name : 'Bill')} Â· ${fm(p.amount)} <span class="muted small">paid ${nice(p.paidOn)}</span></label>`; }).join('')}` : ''}
+      ${pend.map(p => { const b = S.bills.find(x => x.id === p.billId); return `<label class="check"><input type="checkbox" name="pend" value="${esc(p.billId + '|' + p.due)}"${diffDays(p.paidOn, today()) <= 7 ? ' checked' : ''}> ${esc(b ? b.name : 'Bill')} · ${fm(p.amount)} <span class="muted small">paid ${nice(p.paidOn)}</span></label>`; }).join('')}` : ''}
     <label for="sBal">Savings</label><input id="sBal" name="savings" inputmode="decimal" value="${money2(S.balances.savings)}">
     <div class="btns">${cancelBtn}<button class="btn">Save</button></div></form>`);
 }
