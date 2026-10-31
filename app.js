@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's available to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '1.5.3';
+const APP_VERSION = '1.5.4';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -979,10 +979,11 @@ function lockPage(on) {
 }
 function openSheet(html) {
   const sh = $('#sheet');
-  sh.innerHTML = `<div class="sheet-top"><span class="grab" aria-hidden="true"></span><button type="button" class="sheet-x" data-act="close">Close ✕</button></div>` + html;
+  // The top bar sits outside the scrolling area, and only .sheet-body scrolls (more reliable on iPhone).
+  sh.innerHTML = `<div class="sheet-top"><span class="grab" aria-hidden="true"></span><span class="sheet-ver">Bill Planner ${APP_VERSION}</span><button type="button" class="sheet-x" data-act="close">Close ✕</button></div><div class="sheet-body">${html}</div>`;
   sh.hidden = false; $('#scrim').hidden = false;
   sh.style.transform = '';
-  sh.scrollTop = 0;
+  sh.querySelector('.sheet-body').scrollTop = 0;
   lockPage(true);
   // The app checks forms itself and shows problems inside the form.
   sh.querySelectorAll('form').forEach(f => { f.noValidate = true; });
@@ -1003,26 +1004,33 @@ function formError(f, msg, field) {
   f.querySelectorAll('.field-bad').forEach(x => x.classList.remove('field-bad'));
   const el = field && f.querySelector(`[name="${field}"]`);
   if (el) el.classList.add('field-bad');
-  $('#sheet').scrollTop = 0;
+  const body = $('#sheet .sheet-body'); if (body) body.scrollTop = 0;
 }
 // Swipe down on a pop-up (when it's scrolled to the top) to close it.
 (function swipeToClose() {
   const sh = $('#sheet');
-  let startY = null, dy = 0;
+  let startY = null, dy = 0, fromBar = false;
+  const bodyTop = () => { const b = sh.querySelector('.sheet-body'); return !b || b.scrollTop <= 0; };
   sh.addEventListener('touchstart', e => {
-    startY = (sh.scrollTop <= 0 && !e.target.closest('input, textarea, select')) ? e.touches[0].clientY : null; dy = 0;
+    fromBar = !!e.target.closest('.sheet-top');
+    // From the top bar always; from the form only when it's already scrolled to the top.
+    const fromFormTop = bodyTop() && !e.target.closest('input, textarea, select, button');
+    startY = (fromBar && !e.target.closest('button')) || fromFormTop ? e.touches[0].clientY : null;
+    dy = 0;
   }, { passive: true });
   sh.addEventListener('touchmove', e => {
     if (startY == null) return;
     dy = e.touches[0].clientY - startY;
-    if (dy > 0 && sh.scrollTop <= 0) { sh.style.transform = `translateY(${dy}px)`; e.preventDefault(); }
-    else { sh.style.transform = ''; }
+    if (dy > 0 && (fromBar || bodyTop())) { sh.style.transform = `translateY(${dy}px)`; e.preventDefault(); }
+    else { sh.style.transform = ''; if (!fromBar) startY = null; }
   }, { passive: false });
   sh.addEventListener('touchend', () => {
     if (startY == null) return;
     if (dy > 90) closeSheet(); else sh.style.transform = '';
     startY = null; dy = 0;
   });
+  // Swiping on the dimmed area behind a pop-up must never scroll the page.
+  $('#scrim').addEventListener('touchmove', e => e.preventDefault(), { passive: false });
 })();
 let toastTimer;
 function toast(msg) {

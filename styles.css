@@ -175,21 +175,33 @@ input[type=checkbox] { width: 22px; min-height: 22px; height: 22px; margin: 0; a
 #tabs button.on { color: var(--brand); }
 
 /* Bottom sheet */
-#scrim { position: fixed; inset: 0; background: rgba(0,0,0,.4); z-index: 9; }
+#scrim { position: fixed; inset: 0; background: rgba(0,0,0,.4); z-index: 9; touch-action: none; }
+/* Pop-up: a fixed-height box with a top bar that never scrolls, and a body that scrolls on its own.
+   (A pop-up that scrolls as a whole doesn't work reliably on iPhone: swipes go to the page behind.) */
 #sheet {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 10;
-  max-height: 92vh; overflow-y: auto; -webkit-overflow-scrolling: touch;
+  display: flex; flex-direction: column;
+  max-height: calc(100vh - 40px - env(safe-area-inset-top));
+  max-height: calc(100dvh - 40px - env(safe-area-inset-top));
+  overflow: hidden;
   background: var(--card); border-radius: 18px 18px 0 0;
-  padding: 10px 16px calc(18px + env(safe-area-inset-bottom));
   max-width: 560px; margin: 0 auto;
+  transition: transform .15s ease-out;
 }
-#sheet { overscroll-behavior: contain; transition: transform .15s ease-out; padding-top: 0; }
+#sheet[hidden] { display: none !important; }
+.sheet-body {
+  flex: 1 1 auto; min-height: 0;
+  overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; touch-action: pan-y;
+  padding: 4px 16px calc(24px + env(safe-area-inset-bottom));
+}
 /* Always-visible top bar with a grab handle and a Close button */
 .sheet-top {
-  position: sticky; top: 0; z-index: 2; background: var(--card);
-  display: flex; align-items: center; justify-content: flex-end;
-  margin: 0 -16px 6px; padding: 10px 12px 6px; border-bottom: 1px solid var(--line);
+  flex: none; position: relative; background: var(--card);
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 12px 8px 16px; border-bottom: 1px solid var(--line); border-radius: 18px 18px 0 0;
+  touch-action: none;
 }
+.sheet-ver { font-size: 12px; color: var(--muted); }
 .sheet-top .grab { position: absolute; left: 50%; top: 6px; transform: translateX(-50%); width: 38px; height: 5px; border-radius: 3px; background: var(--line); }
 .sheet-x {
   background: var(--chip); color: var(--text); border: 0; border-radius: 10px;
