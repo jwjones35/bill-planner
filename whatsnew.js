@@ -4,6 +4,17 @@
    Every release adds an entry here, in plain words: added, changed, fixed, removed. */
 const CHANGELOG = [
   {
+    v: '2.0.0', date: '2026-10-31',
+    added: ['Spending watch: every purchase is sorted (groceries, fuel, eating out, snacks and drinks, alcohol, entertainment, household).',
+      'Weekly limits for eating out, snacks and drinks, alcohol and entertainment, with a meter on Home. Both phones get a notification at 75% and when a limit is passed, plus a report on Sunday evening.',
+      'Cards are remembered: purchases on a known card show whose card it is, and totals are split per person. Set them under More › Spending watch.',
+      'Gas-station questions: who made the purchase and exactly how much was fuel (gallons, cost, odometer). The rest counts as snacks and drinks.',
+      'The question goes to the right phone by itself ("Not me" sends it to the other person), reminds every 2 hours until it\'s answered, and can\'t be closed or skipped.',
+      'Fuel check: answers are checked against the tank size, recent prices per gallon, and the miles driven at each vehicle\'s miles per gallon. Anything that doesn\'t add up alerts both phones.',
+      'A notice when the other person\'s phone isn\'t getting notifications.'],
+    changed: ['To turn on the gas-station questions, add your vehicles under More › Spending watch.']
+  },
+  {
     v: '1.9.4', date: '2026-10-31',
     removed: ['The "everyday spending" estimate. Food, gas and fun are no longer guessed anywhere; what you really spend still lowers your balance as it happens.'],
     changed: ['Paydays: a week where one paycheck is less than that week\'s bills now says "Covered by your cushion" in grey instead of a red "Short by". Red only appears if the cushion itself would run out ("Not enough").',

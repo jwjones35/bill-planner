@@ -108,6 +108,20 @@ button.card.row { border-top: 0; }
 .wn-fix { background: var(--warn-bg); color: var(--warn); }
 .wn-rem { background: var(--bad-bg); color: var(--bad); }
 
+/* Spending watch: weekly meter */
+.meter-row { margin-top: 8px; }
+.meter-top { display: flex; justify-content: space-between; font-size: 14px; font-weight: 600; }
+.meter-bar { height: 12px; border-radius: 6px; background: var(--chip); border: 2px solid var(--ink, #000); overflow: hidden; margin-top: 3px; }
+.meter-fill { display: block; height: 100%; background: var(--good); }
+.meter-fill.near { background: var(--warn); }
+.meter-fill.over { background: var(--bad); }
+/* Gas-station question */
+.fq-head { text-align: center; padding: 8px 0 4px; }
+.fq-store { font-size: 18px; font-weight: 700; margin-top: 2px; }
+.fq-total { font-size: 30px; font-weight: 800; margin-top: 2px; }
+.fq-rest { margin-top: 10px; padding: 8px 10px; border-radius: 10px; background: var(--chip); }
+.sheet-must { font-size: 12px; font-weight: 700; color: var(--warn); text-transform: uppercase; letter-spacing: .04em; }
+
 /* Hero: safe to spend */
 .hero { padding: 18px 16px 14px; background-color: var(--card-2); }
 .hero .big { color: var(--text); }

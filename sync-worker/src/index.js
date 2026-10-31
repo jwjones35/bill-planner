@@ -88,9 +88,10 @@ async function sendDue(env) {
     let items; try { items = JSON.parse(row.items); } catch (e) { items = []; }
     const due = items.filter(i => i.at <= now), later = items.filter(i => i.at > now);
     if (!due.length) continue;
-    const subs = (await env.DB.prepare('SELECT endpoint, p256dh, auth FROM subs WHERE household = ?').bind(row.household).all()).results || [];
+    const subs = (await env.DB.prepare('SELECT endpoint, p256dh, auth, who FROM subs WHERE household = ?').bind(row.household).all()).results || [];
     // Reminders more than 6 hours late (storage was down, etc.) are skipped rather than sent at an odd time.
-    for (const i of due.filter(i => now - i.at < 6 * 3600000)) for (const s of subs) { try { await sendPush(env, s, i.data); } catch (e) { } }
+    // A reminder with "to" goes only to that person's phone(s).
+    for (const i of due.filter(i => now - i.at < 6 * 3600000)) for (const s of subs.filter(s => !i.to || s.who === i.to)) { try { await sendPush(env, s, i.data); } catch (e) { } }
     await env.DB.prepare('UPDATE sched SET items = ? WHERE household = ?').bind(JSON.stringify(later), row.household).run();
   }
 }
@@ -123,7 +124,7 @@ export default {
       }
       return json(req, 405, { error: 'method not allowed' });
     }
-    const m = url.pathname.match(/^\/v1\/h\/([A-Za-z0-9_-]{16,64})(?:\/(sub|sched|test))?$/);
+    const m = url.pathname.match(/^\/v1\/h\/([A-Za-z0-9_-]{16,64})(?:\/(sub|sched|test|notify|subs))?$/);
     if (!m) return json(req, 404, { error: 'not found' });
     const id = m[1];
     const token = (req.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
@@ -142,7 +143,9 @@ export default {
         if (!PUSH_HOSTS.test(ep) || ep.length > 1000) return json(req, 400, { error: 'bad endpoint' });
         if (req.method === 'PUT') {
           if (typeof body.p256dh !== 'string' || typeof body.auth !== 'string' || body.p256dh.length > 200 || body.auth.length > 100) return json(req, 400, { error: 'bad keys' });
-          await env.DB.prepare('INSERT OR REPLACE INTO subs (endpoint, household, p256dh, auth, created) VALUES (?, ?, ?, ?, ?)').bind(ep, id, body.p256dh, body.auth, Date.now()).run();
+          // who: a code for the phone's person, made by the phones with the household key (not a readable name).
+          const who = typeof body.who === 'string' && /^[0-9a-f]{8,64}$/.test(body.who) ? body.who : null;
+          await env.DB.prepare('INSERT OR REPLACE INTO subs (endpoint, household, p256dh, auth, created, who) VALUES (?, ?, ?, ?, ?, ?)').bind(ep, id, body.p256dh, body.auth, Date.now(), who).run();
           return json(req, 200, { ok: true });
         }
         if (req.method === 'DELETE') { await env.DB.prepare('DELETE FROM subs WHERE endpoint = ? AND household = ?').bind(ep, id).run(); return json(req, 200, { ok: true }); }
@@ -150,8 +153,23 @@ export default {
       if (m[2] === 'sched' && req.method === 'PUT') {
         const items = Array.isArray(body.items) ? body.items.slice(0, 200) : null;
         if (!items || items.some(i => !Number.isFinite(i.at) || typeof i.data !== 'string' || i.data.length > 1500)) return json(req, 400, { error: 'bad items' });
-        await env.DB.prepare('INSERT OR REPLACE INTO sched (household, items, updated) VALUES (?, ?, ?)').bind(id, JSON.stringify(items.map(i => ({ at: i.at, data: i.data }))), Date.now()).run();
+        const tag = t => (typeof t === 'string' && /^[0-9a-f]{8,64}$/.test(t) ? t : null);
+        await env.DB.prepare('INSERT OR REPLACE INTO sched (household, items, updated) VALUES (?, ?, ?)').bind(id, JSON.stringify(items.map(i => ({ at: i.at, to: tag(i.to), data: i.data }))), Date.now()).run();
         return json(req, 200, { ok: true });
+      }
+      // Send one notification right now: to one person's phones, or to every phone in the household.
+      if (m[2] === 'notify' && req.method === 'POST') {
+        if (typeof body.data !== 'string' || body.data.length > 1500) return json(req, 400, { error: 'bad data' });
+        const to = typeof body.to === 'string' && /^[0-9a-f]{8,64}$/.test(body.to) ? body.to : null;
+        const subs = (await env.DB.prepare('SELECT endpoint, p256dh, auth, who FROM subs WHERE household = ?').bind(id).all()).results || [];
+        let sent = 0;
+        for (const s of subs.filter(s => !to || s.who === to)) { try { if ((await sendPush(env, s, body.data)) < 300) sent++; } catch (e) { } }
+        return json(req, 200, { sent });
+      }
+      // Which people have a phone set up for notifications (their codes only).
+      if (m[2] === 'subs' && req.method === 'GET') {
+        const subs = (await env.DB.prepare('SELECT who FROM subs WHERE household = ?').bind(id).all()).results || [];
+        return json(req, 200, { tags: subs.map(s => s.who).filter(Boolean) });
       }
       if (m[2] === 'test' && req.method === 'POST') {
         const s = await env.DB.prepare('SELECT endpoint, p256dh, auth FROM subs WHERE endpoint = ? AND household = ?').bind(String(body.endpoint || ''), id).first();

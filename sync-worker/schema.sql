@@ -11,7 +11,8 @@ CREATE TABLE IF NOT EXISTS subs (
   household TEXT NOT NULL,
   p256dh TEXT NOT NULL,
   auth TEXT NOT NULL,
-  created INTEGER NOT NULL
+  created INTEGER NOT NULL,
+  who TEXT
 );
 -- Each household's upcoming reminders: times plus text the phones encrypted (the storage can't read it).
 CREATE TABLE IF NOT EXISTS sched (

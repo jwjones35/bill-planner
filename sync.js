@@ -75,9 +75,10 @@ async function decryptJson(key, str) {
    removed leaves a "tombstone" so the other phone removes it too. Settings get a stamp per field. */
 const SYNC_COLL = {
   bills: r => r.id, incomes: r => r.id, setAsides: r => r.id, infos: r => r.id, spending: r => r.id,
-  payments: r => r.billId + '|' + r.due, receipts: r => r.incomeId + '|' + r.date
+  payments: r => r.billId + '|' + r.due, receipts: r => r.incomeId + '|' + r.date,
+  fuelQ: r => r.id, fuelFlags: r => r.id, vehicles: r => r.id
 };
-const SYNC_FIELDS = ['setupDate', 'balances', 'everydayPerWeek', 'savingsBuffer', 'suggestSavings', 'lastBackup', 'autopayWait'];
+const SYNC_FIELDS = ['setupDate', 'balances', 'everydayPerWeek', 'savingsBuffer', 'suggestSavings', 'lastBackup', 'autopayWait', 'cards', 'limits', 'fuelSince'];
 const SYNC_BANK_LWW = ['labels', 'txNames', 'manual', 'feeAlerts', 'priceAlerts'];
 const SYNC_BANK_UNION = ['ignore', 'noFeePairs', 'feeRules'];
 const SYNC_BANK_FEED = ['accounts', 'tx', 'bal', 'fetchedAt', 'error', 'fetchLog', 'checkingId', 'savingsId'];
@@ -125,6 +126,8 @@ function mergeStates(L, R) {
   if ((rb.fetchedAt || 0) > (lb.fetchedAt || 0)) for (const f of SYNC_BANK_FEED) out.bank[f] = rb[f];
   for (const f of SYNC_BANK_LWW) { const k = 'bank.' + f; if ((rfu[k] || 0) > (fu[k] || 0)) { out.bank[f] = rb[f]; fu[k] = rfu[k]; } }
   for (const f of SYNC_BANK_UNION) out.bank[f] = [...new Set([...(lb[f] || []), ...(rb[f] || [])])].slice(-400);
+  // Alerts already sent (by either phone): keep them all, so nothing is sent twice.
+  out.sentAlerts = [...new Set([...(L.sentAlerts || []), ...(R.sentAlerts || [])])].slice(-500);
   out.tomb = tomb; out.fupd = fu;
   return out;
 }
@@ -204,6 +207,8 @@ function syncApply(remote) {
     syncTakeSnap();
   } finally { syncApplying = false; }
   render();
+  // The other phone may have sent this phone a question.
+  setTimeout(showFuelQuestion, 300);
 }
 // Called by save(): send changes a moment later (several quick saves become one sync).
 function syncSoon() {
@@ -311,7 +316,35 @@ function buildNotes() {
       out.push({ at: at9(d), tag: 'ap-' + key, title: 'Autopay may not have gone through', body: `${x.b.name} (${amt}) was due ${nice(x.d)} and isn't showing at the bank yet.` });
     }
   }
-  return out.filter(i => i.at > now).sort((a, b) => a.at - b.at).slice(0, 150);
+  // Spending watch: question reminders (to one person), the 24-hour heads-up, the Sunday report.
+  try { out.push(...spendNotes()); } catch (e) { }
+  return out.filter(i => i.at > now).sort((a, b) => a.at - b.at).slice(0, 190);
+}
+// A short code for a person, made with the household key: the storage can route a reminder to that person's
+// phone without being able to tell who it is.
+async function personTag(name) {
+  const cfg = syncCfg(); if (!cfg || !name) return null;
+  return (await sha256hex(b64uEnc(await noteKey(cfg)) + '|' + String(name).trim().toLowerCase())).slice(0, 24);
+}
+// Send one notification now, to one person's phone (or every phone when toName is null).
+async function notifyNow(note, toName) {
+  const cfg = syncCfg(); if (!cfg) return;
+  const k = await syncKeys(cfg);
+  const data = await encryptNote(await noteKey(cfg), note);
+  await api('POST', `/v1/h/${cfg.id}/notify`, k.token, { data, to: toName ? await personTag(toName) : null });
+}
+// Which people have a phone that gets notifications (the storage only knows their codes).
+async function checkPhones() {
+  const cfg = syncCfg(); if (!cfg) { offPhones = []; return; }
+  const k = await syncKeys(cfg);
+  const r = await api('GET', `/v1/h/${cfg.id}/subs`, k.token);
+  if (r.status !== 200) return;
+  const tags = new Set(r.j.tags || []), mine = (profile() || {}).name, off = [];
+  for (const n of householdNames()) if (!sameName(n, mine) && !tags.has(await personTag(n))) off.push(n);
+  offPhones = off;
+  // This phone: make sure its notifications are filed under its person (phones set up before this existed).
+  const n = notifyCfg();
+  if (n && mine && !tags.has(await personTag(mine))) { try { await registerSub(); } catch (e) { } }
 }
 let lastNotesHash = null;
 // Keep the stored reminder list in step with the bills (called after each sync).
@@ -321,8 +354,11 @@ async function uploadNotes() {
   const hash = await sha256hex(JSON.stringify(notes));
   if (hash === lastNotesHash) return;
   const raw = await noteKey(cfg), k = await syncKeys(cfg);
-  const items = [];
-  for (const n of notes) items.push({ at: n.at, data: await encryptNote(raw, { title: n.title, body: n.body, tag: n.tag }) });
+  const items = [], tags = {};
+  for (const n of notes) {
+    const to = n.to ? (tags[n.to] = tags[n.to] || await personTag(n.to)) : null;
+    items.push({ at: n.at, to, data: await encryptNote(raw, { title: n.title, body: n.body, tag: n.tag }) });
+  }
   const r = await api('PUT', `/v1/h/${cfg.id}/sched`, k.token, { items });
   if (r.status === 200) lastNotesHash = hash;
 }
@@ -333,15 +369,20 @@ async function notifyOn() {
   if (perm !== 'granted') throw new Error('Notifications are blocked. Turn them on in Settings › Notifications › Bills, then try again.');
   // Notifications go through the sync storage, so this needs sharing turned on (with no other phone, it's private).
   if (!syncLinked()) await syncStart();
+  await registerSub();
+  lastNotesHash = null; await uploadNotes();
+}
+// Give the storage this phone's push address, filed under this phone's person.
+async function registerSub() {
   const cfg = syncCfg(), k = await syncKeys(cfg);
   await idbPut('noteKey', await noteKey(cfg));
   const reg = await swReady();
   const sub = (await reg.pushManager.getSubscription()) || await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64uDec(VAPID_PUBLIC) });
   const j = sub.toJSON();
-  const r = await api('PUT', `/v1/h/${cfg.id}/sub`, k.token, { endpoint: j.endpoint, p256dh: j.keys.p256dh, auth: j.keys.auth });
+  const who = await personTag((profile() || {}).name);
+  const r = await api('PUT', `/v1/h/${cfg.id}/sub`, k.token, { endpoint: j.endpoint, p256dh: j.keys.p256dh, auth: j.keys.auth, who });
   if (r.status !== 200) throw new Error(`Couldn't turn on notifications (error ${r.status}).`);
   setNotifyCfg({ endpoint: j.endpoint });
-  lastNotesHash = null; await uploadNotes();
 }
 // The app's service worker, but never wait more than 3 seconds for it.
 const swReady = () => Promise.race([navigator.serviceWorker.ready, new Promise((_, rej) => setTimeout(() => rej(new Error('The app is still starting up. Try again in a moment.')), 3000))]);

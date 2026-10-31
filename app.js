@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's available to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '1.9.4';
+const APP_VERSION = '2.0.0';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -249,7 +249,7 @@ function nextWeek(c) {
 }
 
 /* ---------- recorded spending (groceries, gas, unexpected costs...) ---------- */
-const SPEND_KINDS = ['Groceries', 'Gas', 'Eating out', 'Household', 'Unexpected', 'Other'];
+const SPEND_KINDS = ['Groceries', 'Fuel', 'Eating out', 'Snacks & drinks', 'Alcohol', 'Entertainment', 'Household', 'Unexpected', 'Other'];
 // The most recent payday on or before today; spending is totalled from there.
 function lastPayday() {
   const t = today();
@@ -427,6 +427,7 @@ function applyBank(j, now) {
     asOf: (() => { const r = raw.find(a => String(a.id) === S.bank.checkingId); const s = r && Number(r['balance-date']); return s ? s * 1000 : null; })()
   };
   runMatching();
+  spendScan(); // new gas-station purchases get their "how much was fuel?" question
 }
 
 /* Checking as it really stands: the bank's balance, minus things entered in the app that the bank doesn't show yet
@@ -497,7 +498,8 @@ const savingsNow = () => (bankOn() && S.bank.bal.savings != null ? S.bank.bal.sa
 // Match bank transactions to bills and paychecks. Confirmed matches happen automatically; first-time ones are
 // offered for the user to confirm on Home.
 function runMatching() {
-  const used = new Set([...S.payments.map(p => p.txId), ...S.payments.map(p => p.feeTxId), ...S.receipts.map(r => r.txId), ...S.spending.map(x => x.txId)].filter(Boolean));
+  fuelDedupe();
+  const used = new Set([...S.payments.map(p => p.txId), ...S.payments.map(p => p.feeTxId), ...S.receipts.map(r => r.txId), ...S.spending.map(x => x.txId), ...(S.fuelQ || []).map(q => q.txId)].filter(Boolean));
   const ignore = new Set(S.bank.ignore || []);
   const free = t => !used.has(t.id) && !ignore.has(t.id);
   const suggest = [];
@@ -517,6 +519,7 @@ function runMatching() {
   }
   for (const r of S.receipts) relink(r, 'txId', r.amount, r.txDate || r.date);
   for (const x of S.spending) relink(x, 'txId', -x.amount, x.date);
+  for (const q of S.fuelQ || []) relink(q, 'txId', -q.total, q.txDate || q.date);
   // 1. Link things entered in the app to the bank transaction once it shows up.
   // Oldest payment first, each taking the charge closest to its date, so two same-amount payments don't swap charges.
   const byDate = p => (a, c) => Math.abs(diffDays(a.date, p.paidOn)) - Math.abs(diffDays(c.date, p.paidOn));
@@ -797,7 +800,7 @@ function render() {
   document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
   autopayNoBank();
   // A red count on the Home tab (and on the app icon, where the phone allows it) while bills are past due.
-  const late = pastDue().length + autopayLate().length, homeBtn = document.querySelector('#tabs [data-tab=home]');
+  const late = pastDue().length + autopayLate().length + (fuelOn() ? myQs().length : 0), homeBtn = document.querySelector('#tabs [data-tab=home]');
   let badge = homeBtn && homeBtn.querySelector('.badge');
   if (homeBtn && late && !badge) { badge = document.createElement('span'); badge.className = 'badge'; homeBtn.appendChild(badge); }
   if (badge) { badge.hidden = !late; badge.textContent = late; badge.setAttribute('aria-label', `${late} past due`); }
@@ -1012,7 +1015,7 @@ function viewHome() {
   </div>`;
 
   // 1. Needs your attention: only things that need a decision or action. Nothing here = nothing to do.
-  let att = pastDueHtml() + autopayHtml('late') + notClearedHtml() + sugHtml;
+  let att = spendAttentionHtml() + pastDueHtml() + autopayHtml('late') + notClearedHtml() + sugHtml;
   const missed = payList(addDays(t, -10) > S.setupDate ? addDays(t, -10) : S.setupDate, t);
   if (missed.length) att += `<div class="banner warn">Did ${missed.length === 1 ? 'this paycheck' : 'these paychecks'} arrive? ${missed.map(p => `<b>${esc(p.inc.name)}</b> (${nice(p.d)})`).join(', ')}. <a href="#" data-act="tab" data-tab="pay">Confirm on Paydays</a></div>`;
   if (c.unknown.length) att += `<div class="banner warn">${c.unknown.map(x => `<b>${esc(x.b.name)}</b>`).join(', ')} ${c.unknown.length === 1 ? 'has' : 'have'} no amount yet, so ${c.unknown.length === 1 ? "it isn't" : "they aren't"} counted. Tap the bill to add one.</div>`;
@@ -1037,6 +1040,8 @@ function viewHome() {
   h += autopayHtml('waiting');
   const todayPay = payList(t, addDays(t, 1));
   if (todayPay.length) h += `<div class="banner good">Payday today: ${todayPay.map(p => esc(p.inc.name)).join(', ')}. <a href="#" data-act="tab" data-tab="pay">Confirm the amounts</a> when they land.</div>`;
+  // The spending watch: eating out, snacks, alcohol and entertainment this week, against the limits.
+  h += meterHtml();
 
   // 3. Good to know (nice news, never a problem).
   let good = '';
@@ -1075,7 +1080,9 @@ function viewHome() {
     const n = bankSpend.length + handSpend.length;
     h += `<details class="card" style="margin-top:10px"><summary class="row"><span class="main"><div class="name">Spending since ${nice(since)}</div><div class="sub">${n} purchase${n === 1 ? '' : 's'}${bankOn() ? ` · from ${esc(bankName())}` : ''} · tap to see</div></span><span class="amt num">${fm(total)}</span></summary>
       ${handSpend.map(x => `<button class="row" data-act="spendEdit" data-id="${x.id}"><span class="dot ok"></span><span class="main"><div class="name">${esc(x.what)}${x.note ? ` <span class="muted" style="font-weight:400">· ${esc(x.note)}</span>` : ''}</div><div class="sub">${nice(x.date)} · ${x.cash ? 'cash, entered by hand' : 'entered by hand' + (bankOn() ? ', not at the bank yet' : '')}</div></span><span class="amt num">${fm(x.amount)}</span></button>`).join('')}
-      ${bankSpend.map(t => { const l = labelFor(t); return `<button class="row" data-act="txWhat" data-id="${esc(t.id)}"><span class="dot ${t.pending ? 'soon' : 'ok'}"></span><span class="main"><div class="name">${esc(txName(t))}${l && l.cat ? ` <span class="tag">${esc(l.cat)}</span>` : ''}</div><div class="sub">${nice(t.date)}${t.pending ? ' · pending' : ''}${linked.has(t.id) ? ' · also entered by hand' : ''}${feeOf[t.id] ? ` · includes ${fm(-feeOf[t.id].amount)} fee` : ''}${l && l.name ? ` · bank: ${esc(t.desc)}` : ' · tap to name it'}</div></span><span class="amt num">${fm(-t.amount + (feeOf[t.id] ? -feeOf[t.id].amount : 0))}</span></button>`; }).join('')}
+      ${bankSpend.map(t => { const l = labelFor(t), ck = txCat(t), who = whoOfTx(t), q = (S.fuelQ || []).find(q => q.txId === t.id);
+        const catTag = ck === 'station' ? (q && q.answer ? (q.answer.unrecognized ? 'Not recognized' : q.answer.none ? 'Snacks & drinks' : `Fuel ${fm(q.answer.fuel)} + snacks ${fm(Math.max(0, -t.amount - q.answer.fuel))}`) : 'Gas station') : ck ? CATS[ck].name : '';
+        return `<button class="row" data-act="txWhat" data-id="${esc(t.id)}"><span class="dot ${t.pending ? 'soon' : 'ok'}"></span><span class="main"><div class="name">${esc(txName(t))}${catTag ? ` <span class="tag${ck && CATS[ck] && CATS[ck].fun ? ' warn' : ''}">${esc(catTag)}</span>` : ''}${who ? ` <span class="tag">${esc(sameName(who, (profile() || {}).name) ? 'Me' : who)}</span>` : ''}</div><div class="sub">${nice(t.date)}${t.pending ? ' · pending' : ''}${linked.has(t.id) ? ' · also entered by hand' : ''}${feeOf[t.id] ? ` · includes ${fm(-feeOf[t.id].amount)} fee` : ''}${l && l.name ? ` · bank: ${esc(t.desc)}` : ' · tap to name it'}</div></span><span class="amt num">${fm(-t.amount + (feeOf[t.id] ? -feeOf[t.id].amount : 0))}</span></button>`; }).join('')}
     </details>`;
   }
 
@@ -1200,6 +1207,7 @@ function viewMore() {
     <div class="sub">${pr && pr.name ? 'This phone · tap to change' : 'Tap to add your name, so your own paychecks show as "Me"'}</div></span></button></div>
   ${syncCardHtml()}
   ${notifyCardHtml()}
+  ${spendMoreHtml()}
   <h2>About</h2><div class="card"><button class="row" data-act="whatsNew"><span class="main"><div class="name">What's new</div><div class="sub">Version ${APP_VERSION} · see what changed in each update</div></span></button></div>
   <h2>Bank connection</h2><div class="card">${bankAccess()
     ? `<div class="pad"><div><b>${bankOn() ? `Connected to ${esc(bankName())}` : 'Connected, waiting for the first update'}</b></div>
@@ -1272,10 +1280,16 @@ function lockPage(on) {
     window.scrollTo(0, pageScrollY);
   }
 }
-function openSheet(html) {
+/* opts.locked: a question that must be answered (gas-station purchases). It has no Close button, can't be swiped or
+   tapped away, and other pop-ups can't replace it; only its own answer buttons close it. */
+const sheetLocked = () => !$('#sheet').hidden && $('#sheet').dataset.locked === '1';
+function openSheet(html, opts) {
   const sh = $('#sheet');
+  const locked = !!(opts && opts.locked);
+  if (sheetLocked() && !locked) return false;
   // The top bar sits outside the scrolling area, and only .sheet-body scrolls (more reliable on iPhone).
-  sh.innerHTML = `<div class="sheet-top"><span class="grab" aria-hidden="true"></span><span class="sheet-ver">Bill Planner ${APP_VERSION}</span><button type="button" class="sheet-x" data-act="close">Close ✕</button></div><div class="sheet-body">${html}</div>`;
+  sh.innerHTML = `<div class="sheet-top"><span class="grab" aria-hidden="true"></span><span class="sheet-ver">Bill Planner ${APP_VERSION}</span>${locked ? '<span class="sheet-must">Answer to continue</span>' : '<button type="button" class="sheet-x" data-act="close">Close ✕</button>'}</div><div class="sheet-body">${html}</div>`;
+  sh.dataset.locked = locked ? '1' : ''; if (!locked) delete sh.dataset.q;
   sh.hidden = false; $('#scrim').hidden = false;
   sh.style.transform = '';
   sh.querySelector('.sheet-body').scrollTop = 0;
@@ -1285,9 +1299,13 @@ function openSheet(html) {
   sh.querySelectorAll('input[inputmode=decimal]:not([placeholder])').forEach(i => { i.placeholder = '0.00'; });
   const f = sh.querySelector('input:not([type=checkbox]):not([type=hidden]), select');
   if (f && !('ontouchstart' in window)) f.focus();
+  return true;
 }
-function closeSheet() {
+// force: only a locked question's own answer closes it.
+function closeSheet(force) {
   const sh = $('#sheet');
+  if (sheetLocked() && force !== true) { sh.style.transform = ''; return; }
+  sh.dataset.locked = ''; delete sh.dataset.q;
   sh.hidden = true; $('#scrim').hidden = true; sh.innerHTML = ''; sh.style.transform = '';
   lockPage(false);
 }
@@ -1316,7 +1334,7 @@ function formError(f, msg, field) {
   sh.addEventListener('touchmove', e => {
     if (startY == null) return;
     dy = e.touches[0].clientY - startY;
-    if (dy > 0 && (fromBar || bodyTop())) { sh.style.transform = `translateY(${dy}px)`; e.preventDefault(); }
+    if (dy > 0 && (fromBar || bodyTop())) { if (!sheetLocked()) sh.style.transform = `translateY(${dy}px)`; e.preventDefault(); }
     else { sh.style.transform = ''; if (!fromBar) startY = null; }
   }, { passive: false });
   sh.addEventListener('touchend', () => {
@@ -1876,6 +1894,7 @@ document.addEventListener('click', e => {
       break;
     default:
       if (act && act.startsWith('sync')) syncAct(act);
+      else if (act) spendAct(act, el);
   }
 });
 document.addEventListener('change', e => {
@@ -1983,7 +2002,7 @@ document.addEventListener('submit', e => {
       const cash = fd.get('cash') === 'on';
       const inTransit = !cash && bankOn();
       const adjusted = !cash && !bankOn() && fd.get('adjust') === 'on';
-      S.spending.push({ id: uid(), date: fd.get('date') || today(), amount, what: fd.get('what'), note: fd.get('note').trim(), adjusted, inTransit, cash, at: Date.now() });
+      S.spending.push({ id: uid(), date: fd.get('date') || today(), amount, what: fd.get('what'), note: fd.get('note').trim(), adjusted, inTransit, cash, at: Date.now(), who: (profile() || {}).name || null });
       if (adjusted) S.balances.checking = (S.balances.checking || 0) - amount;
       if (inTransit) runMatching();
       // Keep the history from growing forever: drop records older than about 4 months
@@ -2108,6 +2127,7 @@ document.addEventListener('submit', e => {
       save(); closeSheet(); render(); break;
     }
     case 'fJoin': syncSubmitJoin(f); break;
+    default: spendSubmit(f);
   }
 });
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet(); });
@@ -2121,7 +2141,16 @@ document.addEventListener('focusin', e => {
 
 // Re-draw when the app comes back to the front (the date may have changed).
 // When sharing with another phone, bring in its changes first, then check the bank.
-async function refreshAll() { if (syncLinked()) await syncNow(); fetchBank(false); }
+async function refreshAll() {
+  if (syncLinked()) await syncNow();
+  await fetchBank(false);
+  if (!S) return;
+  // Spending watch: send any questions and alerts that are due, and show this phone's own question.
+  try { await spendAlerts(); } catch (e) { }
+  if (syncLinked()) { try { await syncNow(); await checkPhones(); } catch (e) { } }
+  render();
+  showFuelQuestion();
+}
 document.addEventListener('visibilitychange', () => { if (!document.hidden) { render(); refreshAll(); } });
 // While the app is open, check the other phone's changes every 30 seconds.
 setInterval(() => { if (!document.hidden && syncLinked()) syncNow(); }, 30000);
@@ -2132,7 +2161,7 @@ syncTakeSnap();
 refreshAll(); // the bank updates if connected and the last update is over an hour old
 // Right after an update: "What's new". Otherwise the one-time "Whose phone is this?" question, once there are
 // paychecks to label.
-setTimeout(() => { if (!showWhatsNewIfUpdated() && S && S.incomes.length) askProfileOnce(); }, 600);
+setTimeout(() => { if (showFuelQuestion()) return; if (!showWhatsNewIfUpdated() && S && S.incomes.length) askProfileOnce(); }, 600);
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => { });
 if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === '127.0.0.1' || location.hostname === 'localhost')) {
   // When a new version of the app takes over, reload once so it shows straight away.
