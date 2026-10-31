@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's available to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '1.5.0';
+const APP_VERSION = '1.5.1';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -252,7 +252,8 @@ function whenText(ms) {
 }
 // How old the bank's own data is (falls back to when the app last checked).
 const bankAsOf = () => S.bank.bal && (S.bank.bal.asOf || S.bank.bal.at);
-const bankAgeText = () => `${esc(bankName())} balance as of ${whenText(bankAsOf())}`;
+const capFirst = s => s.charAt(0).toUpperCase() + s.slice(1);
+const bankAgeText = () => `${esc(capFirst(bankName()))} balance as of ${whenText(bankAsOf())}`;
 function timeAgo(ms) {
   const m = Math.round((Date.now() - ms) / 60000);
   if (m < 1) return 'just now';
@@ -331,9 +332,12 @@ async function fetchBank(force) {
 
 function applyBank(j, now) {
   const raw = Array.isArray(j.accounts) ? j.accounts : [];
+  // Newer SimpleFIN answers name the bank in a separate "connections" list instead of on each account.
+  const conns = {};
+  (Array.isArray(j.connections) ? j.connections : []).forEach(c => { if (c && c.conn_id) conns[c.conn_id] = c.name || c.org_name || c.org_id || ''; });
   S.bank.accounts = raw.map(a => ({
     id: String(a.id), name: a.name || 'Account',
-    org: (a.org && (a.org.name || a.org.domain)) || '',
+    org: (a.org && (a.org.name || a.org.domain)) || conns[a.conn_id] || '',
     balance: parseFloat(a.balance), available: a['available-balance'] != null && a['available-balance'] !== '' ? parseFloat(a['available-balance']) : null
   }));
   const accts = S.bank.accounts;
@@ -569,6 +573,19 @@ function relatedBillPairs() {
   }
   return out;
 }
+let lastCombine = null;
+function sheetCombine(big, small) {
+  if (!big || !small) return;
+  const key = [big.id, small.id].sort().join('+');
+  openSheet(`<h3>Combine these two bills?</h3>
+    <div class="breakdown num" style="font-size:15px;margin-top:8px">
+      <div><span>${esc(big.name)}</span><span>${fm(big.amount)}</span></div>
+      <div><span>${esc(small.name)}</span><span>${fm(small.amount)}</span></div>
+      <div class="sum"><span>Combined total, ${freqText(big).toLowerCase()}</span><span>${fm(big.amount + small.amount)}</span></div></div>
+    <p class="small" style="margin-top:10px">If you combine them, <b>${esc(big.name)}</b> becomes one bill of ${fm(big.amount)} plus a ${fm(small.amount)} <b>transaction fee</b>, and "${esc(small.name)}" stops being a separate bill. Only do this if the smaller charge is a fee for paying the larger bill.</p>
+    <div class="btns"><button class="btn ghost" data-act="combineNot" data-key="${key}">Cancel, these are not related</button></div>
+    <div class="btns"><button class="btn ghost" data-act="close">Decide later</button><button class="btn" data-act="combineDo" data-big="${big.id}" data-small="${small.id}">Yes, combine them</button></div>`);
+}
 function combineBills(bigId, smallId) {
   const big = findB(bigId), small = findB(smallId);
   if (!big || !small) return;
@@ -675,7 +692,7 @@ function viewHome() {
     sugHtml += `<div class="card pad" style="margin-top:12px"><div><b>These two bills look related</b></div>
       <div class="small" style="margin-top:4px">${esc(pr.big.name)} (${fm(pr.big.amount)}) and ${esc(pr.small.name)} (${fm(pr.small.amount)}) are both ${freqText(pr.big).toLowerCase()}.</div>
       <div class="small muted" style="margin-top:4px">Combine them into one bill, with the ${fm(pr.small.amount)} as its transaction fee? The total would be ${fm(pr.big.amount + pr.small.amount)}.</div>
-      <div class="btns" style="margin-top:8px"><button class="btn small ghost" data-act="pairNo" data-key="${pr.key}">Keep separate</button><button class="btn small" data-act="pairYes" data-big="${pr.big.id}" data-small="${pr.small.id}">Combine</button></div></div>`;
+      <div class="btns" style="margin-top:8px"><button class="btn small ghost" data-act="pairNo" data-key="${pr.key}">Not related</button><button class="btn small" data-act="pairYes" data-big="${pr.big.id}" data-small="${pr.small.id}">Combine...</button></div></div>`;
   }
   if (bankOn() && S.bank.suggest.length) {
     sugHtml += `<h2>Found at ${esc(bankName())}: please confirm</h2><div class="card">` + S.bank.suggest.slice(0, 5).map((s, i) => {
@@ -687,7 +704,7 @@ function viewHome() {
         return `<div class="pad" style="border-top:1px solid var(--line)"><div class="small muted">${nice(t.date)}</div>
         <div><b>${esc(txName(t))}</b>: two charges, <span class="num">${fm(-t.amount)}</span> and <span class="num">${fm(-sm.amount)}</span></div>
         <div class="small" style="margin-top:4px">Are these related? Combine them, with the ${fm(-sm.amount)} as a transaction fee for the ${fm(-t.amount)} charge?</div>
-        <div class="btns" style="margin-top:8px"><button class="btn small ghost" data-act="sugNo" data-i="${i}">Keep separate</button><button class="btn small" data-act="sugYes" data-i="${i}">Combine</button></div></div>`;
+        <div class="btns" style="margin-top:8px"><button class="btn small ghost" data-act="sugNo" data-i="${i}">Not related</button><button class="btn small" data-act="sugYes" data-i="${i}">Combine...</button></div></div>`;
       }
       const f = s.feeTxId && S.bank.tx.find(x => x.id === s.feeTxId);
       const what = s.kind === 'bill' ? `the <b>${esc((findB(s.id) || {}).name || '')}</b> bill due ${nice(s.d)}${f ? `, with the ${fm(-f.amount)} charge as its fee` : ''}` : `the <b>${esc((findI(s.id) || {}).name || '')}</b> paycheck for ${nice(s.d)}`;
@@ -706,7 +723,7 @@ function viewHome() {
     ${bankOn()
       ? (manualBal()
         ? `<div class="small muted" style="margin-top:4px">Using the balance you entered from your bank's app (${whenText(manualBal().at)}) until the bank connection has newer data · <a href="#" data-act="balances">Change</a></div>`
-        : `<div class="small muted" style="margin-top:4px">${bankBusy ? `Updating from ${esc(bankName())}...` : `${bankAgeText()} (updates about once a day) · <a href="#" data-act="balances">Enter today's balance from your bank's app</a>`}</div>
+        : `<div class="small muted" style="margin-top:4px">${bankBusy ? `Updating from ${esc(bankName())}...` : `<a href="#" data-act="balances">${bankAgeText()}</a> (updates about once a day) · <a href="#" data-act="balances">Balance details, or enter today's balance from your bank's app</a>`}</div>
          ${!bankBusy && Date.now() - bankAsOf() > 36 * HOUR ? `<div class="small" style="margin-top:4px;color:var(--warn)">The bank data is over a day old, so recent purchases may be missing. For an up-to-the-minute number, enter today's balance from your bank's app.</div>` : ''}`)
         + (S.bank.error ? `<div class="small neg" style="margin-top:4px">${esc(S.bank.error)}</div>` : '')
       : `<div class="small muted" style="margin-top:4px">${stale} · <a href="#" data-act="balances">Update</a></div>`}
@@ -957,7 +974,9 @@ function closeSheet() { $('#sheet').hidden = true; $('#scrim').hidden = true; $(
 let toastTimer;
 function toast(msg) {
   const t = $('#toast'); t.textContent = msg; t.hidden = false;
-  clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.hidden = true; }, 2600);
+  // Long enough to read (about 5 seconds, longer for long messages); tapping it closes it sooner.
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.hidden = true; }, Math.max(5000, msg.length * 70));
+  t.onclick = () => { t.hidden = true; };
 }
 const cancelBtn = `<button type="button" class="btn ghost" data-act="close">Cancel</button>`;
 // Amount boxes start empty instead of "0.00", so there's nothing to delete before typing.
@@ -1037,6 +1056,7 @@ function sheetBill(b, draft) {
     <label for="bNote">Note</label><input id="bNote" name="note" value="${esc(x.note || '')}" placeholder="Optional">
     ${hist.length ? `<label>Recent payments</label><div class="small num">${hist.map(p => `<div class="toolbar"><span>${nice(p.due)}</span><span>${fm(p.amount)}${p.fee ? ` <span class="${b && b.fee && p.fee > b.fee + 0.01 ? 'neg' : 'muted'}">(includes ${fm(p.fee)} fee)</span>` : ''}</span></div>`).join('')}</div>` : ''}
     <div class="btns">${cancelBtn}<button class="btn">Save</button></div>
+    ${b && b.fee ? `<div class="btns"><button type="button" class="btn ghost" data-act="splitFee" data-id="${b.id}">Split the ${fm(b.fee)} fee back into its own bill</button></div>` : ''}
     ${b ? `<div class="btns"><button type="button" class="btn danger" data-act="delBill" data-id="${b.id}">Delete bill</button></div>` : ''}
   </form>`);
 }
@@ -1315,11 +1335,38 @@ document.addEventListener('click', e => {
         save(); render(); toast('Bank disconnected. Balances are entered by hand again.');
       }
       break;
-    case 'pairYes': {
+    case 'pairYes': sheetCombine(findB(el.dataset.big), findB(el.dataset.small)); break;
+    case 'combineDo': {
       const big = findB(el.dataset.big), small = findB(el.dataset.small);
-      combineBills(el.dataset.big, el.dataset.small);
+      if (!big || !small) { closeSheet(); break; }
+      // Keep a copy so the result screen can undo it.
+      lastCombine = { bills: S.bills.map(b => JSON.parse(JSON.stringify(b))), payments: JSON.parse(JSON.stringify(S.payments)) };
+      const smallName = small.name, smallAmt = small.amount;
+      combineBills(big.id, small.id);
       if (bankOn()) runMatching();
-      save(); render(); toast(`Combined: ${big.name} now includes a ${fm(big.fee)} transaction fee.`); break;
+      save(); render();
+      openSheet(`<h3>Bills combined</h3>
+        <p><b>${esc(big.name)}</b> is now one bill: ${fm(big.amount)} plus a ${fm(big.fee)} transaction fee, ${fm(big.amount + big.fee)} in total.</p>
+        <p class="small muted">"${esc(smallName)}" (${fm(smallAmt)}) is now this bill's transaction fee instead of a separate bill. The fee is shown on the bill and on the Bills tab, and you'll be warned if it's ever higher than usual.</p>
+        <div class="btns"><button class="btn ghost" data-act="combineUndo">Undo, they're not related</button><button class="btn" data-act="close">OK</button></div>`);
+      break;
+    }
+    case 'combineUndo':
+      if (lastCombine) { S.bills = lastCombine.bills; S.payments = lastCombine.payments; lastCombine = null; save(); }
+      closeSheet(); render(); toast('Undone. The two bills are separate again.'); break;
+    case 'combineNot':
+      S.ignorePairs = [...new Set([...(S.ignorePairs || []), el.dataset.key])]; save(); closeSheet(); render();
+      toast("OK, they'll stay separate and you won't be asked again."); break;
+    case 'splitFee': {
+      const b = findB(id);
+      if (!b || !b.fee) break;
+      if (!confirm(`Split the ${fm(b.fee)} fee back into its own bill?`)) break;
+      const nb = { id: uid(), name: b.name + ' fee', freq: b.freq, day: b.day, anchor: b.anchor, amount: b.fee, varies: false, active: true, match: [...(b.match || [])] };
+      S.bills.push(nb);
+      b.fee = 0;
+      // They were split on purpose, so don't offer to combine them again.
+      S.ignorePairs = [...new Set([...(S.ignorePairs || []), [b.id, nb.id].sort().join('+')])];
+      save(); closeSheet(); render(); toast('The fee is now its own bill again.'); break;
     }
     case 'pairNo': S.ignorePairs = [...new Set([...(S.ignorePairs || []), el.dataset.key])]; save(); render(); break;
     case 'manualClear': S.bank.manual = null; save(); closeSheet(); render(); toast('Back to the automatic balance from the bank connection.'); break;
@@ -1329,8 +1376,25 @@ document.addEventListener('click', e => {
       save(); render(); break;
     }
     case 'txWhat': { const t = S.bank.tx.find(x => x.id === id); if (t) sheetTxWhat(t); break; }
-    case 'sugYes': answerSuggestion(Number(el.dataset.i), true); break;
-    case 'sugNo': answerSuggestion(Number(el.dataset.i), false); break;
+    case 'sugYes': {
+      const i = Number(el.dataset.i), s = S.bank.suggest[i];
+      if (s && s.kind === 'fee') {
+        const t = S.bank.tx.find(x => x.id === s.txId), sm = S.bank.tx.find(x => x.id === s.smallId);
+        if (!t || !sm) break;
+        openSheet(`<h3>Combine these two charges?</h3>
+          <div class="breakdown num" style="font-size:15px;margin-top:8px">
+            <div><span>${esc(txName(t))}, ${nice(t.date)}</span><span>${fm(-t.amount)}</span></div>
+            <div><span>${esc(txName(sm))}, ${nice(sm.date)}</span><span>${fm(-sm.amount)}</span></div>
+            <div class="sum"><span>Shown as one charge</span><span>${fm(-t.amount - sm.amount)}</span></div></div>
+          <p class="small" style="margin-top:10px">The ${fm(-sm.amount)} charge would be treated as a <b>transaction fee</b> for the ${fm(-t.amount)} charge, now and every time these two show up together. The fee stays visible, and you'll be warned if it's ever higher than usual.</p>
+          <div class="btns"><button class="btn ghost" data-act="sugNo" data-i="${i}">Cancel, these are not related</button></div>
+          <div class="btns"><button class="btn ghost" data-act="close">Decide later</button><button class="btn" data-act="sugFeeDo" data-i="${i}">Yes, combine them</button></div>`);
+        break;
+      }
+      answerSuggestion(i, true); break;
+    }
+    case 'sugFeeDo': closeSheet(); answerSuggestion(Number(el.dataset.i), true); break;
+    case 'sugNo': closeSheet(); answerSuggestion(Number(el.dataset.i), false); break;
     case 'unrecv': {
       const inc = findI(id); const r = rcptRec(inc, d);
       if (r) { if (r.adjusted) S.balances.checking = (S.balances.checking || 0) - r.amount; S.receipts = S.receipts.filter(x => x !== r); save(); }
