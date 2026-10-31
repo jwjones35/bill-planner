@@ -400,6 +400,57 @@ async function notifyTest() {
   const r = await api('POST', `/v1/h/${cfg.id}/test`, k.token, { endpoint: n.endpoint, data });
   if (r.status !== 200) throw new Error(`The test didn't go through (error ${r.j && r.j.status || r.status}${r.j && r.j.detail ? ': ' + r.j.detail : ''}). Try turning notifications off and on again.`);
 }
+/* Notifications health. The app needs them for bill reminders and gas-station questions, so on every open it checks
+   this phone. If they're off, a pop-up offers a one-button fix (or, if they're blocked in iPhone Settings, says
+   exactly where to turn them back on). Only shown in the Home Screen app, where iPhones allow notifications. */
+async function notifyHealth() {
+  if (!pushSupported() || (isIOS() && !isStandalone())) return 'unsupported';
+  if (Notification.permission === 'denied') return 'blocked';
+  if (Notification.permission !== 'granted' || !notifyCfg()) return 'off';
+  try {
+    const reg = await swReady(); const sub = await reg.pushManager.getSubscription();
+    if (!sub) return 'off';
+    if (notifyCfg().endpoint !== sub.endpoint) await registerSub(); // the phone was given a new push address
+  } catch (e) { return 'ok'; }
+  return 'ok';
+}
+// Shown each time the app is opened (at most every 30 minutes, so switching apps briefly doesn't nag).
+let notifyPromptShown = false, notifyPromptAt = 0;
+async function notifyPrompt(force) {
+  if (!S) return false;
+  if (!force && Date.now() - notifyPromptAt < 30 * 60000) return false;
+  if (!$('#sheet').hidden) return false; // never on top of another pop-up (a question, What's new...)
+  const h = await notifyHealth();
+  if (h === 'ok' || h === 'unsupported') return false;
+  notifyPromptShown = true; notifyPromptAt = Date.now();
+  if (h === 'blocked') openSheet(`<div class="wn-splash"><div class="wn-badge">Notifications are off</div>
+      <h3>Turn notifications back on</h3></div>
+      <p>Bill Planner can't remind you about bills due, or ask about gas-station purchases, while notifications are blocked.</p>
+      <ol style="padding-left:20px"><li>Open your iPhone's <b>Settings</b> app.</li><li>Tap <b>Notifications</b>, then <b>Bills</b>.</li><li>Turn on <b>Allow Notifications</b>.</li><li>Come back here and tap the button below.</li></ol>
+      <div class="btns"><button class="btn block" data-act="syncNotifyRecheck">I turned them on</button></div>
+      <div class="btns"><button class="btn small ghost" data-act="close">Not now</button></div>
+      <p class="hint" style="text-align:center">This comes back each time the app opens until notifications are on.</p>`);
+  else openSheet(`<div class="wn-splash"><div class="wn-badge">One step left</div>
+      <h3>Turn on notifications</h3></div>
+      <p>So Bill Planner can tell you when a bill is due, when a bill is late, and when there's a gas-station purchase to answer, even when the app is closed.</p>
+      <div class="btns"><button class="btn block" data-act="syncNotifyOn">Turn on notifications</button></div>
+      <p class="hint">Your iPhone will ask to allow notifications: tap <b>Allow</b>.</p>
+      <div class="btns"><button class="btn small ghost" data-act="close">Not now</button></div>
+      <p class="hint" style="text-align:center">This comes back each time the app opens until notifications are on.</p>`);
+  return true;
+}
+// When someone else's phone has notifications off, tell everyone who does get them (once a day).
+async function notifyOthersOff() {
+  if (!offPhones.length || typeof notifyNow !== 'function') return;
+  const d = today(), mine = (profile() || {}).name;
+  for (const n of offPhones) {
+    if (!sentOnce(`off:${n}:${d}`)) continue;
+    for (const o of householdNames().filter(x => !sameName(x, n))) {
+      try { await notifyNow({ title: `${n}'s notifications are off`, body: `${n} won't get bill reminders or gas-station questions until notifications are turned back on in the app on ${n}'s phone.`, tag: 'off-' + n }, o); } catch (e) { }
+    }
+  }
+  save();
+}
 function notifyCardHtml() {
   const n = notifyCfg();
   const perm = 'Notification' in window ? Notification.permission : 'unsupported';
@@ -491,7 +542,12 @@ async function syncAct(act) {
     if (act === 'syncJoin') { sheetSyncJoin(); return true; }
     if (act === 'syncNow') { await syncNow(); render(); toast(syncStatus.error || 'Synced.'); return true; }
     if (act === 'syncOff') { sheetSyncOff(); return true; }
-    if (act === 'syncNotifyOn') { toast('Turning on notifications...'); await notifyOn(); render(); toast('Notifications are on. Tap "Send a test" to try one.'); return true; }
+    if (act === 'syncNotifyOn') {
+      toast('Turning on notifications...'); await notifyOn(); closeSheet(); render();
+      try { await notifyTest(); toast('Notifications are on. A test one is on its way.'); } catch (e) { toast('Notifications are on.'); }
+      return true;
+    }
+    if (act === 'syncNotifyRecheck') { closeSheet(); notifyPromptShown = false; if (!(await notifyPrompt(true))) { if (Notification.permission === 'granted' && !notifyCfg()) await syncAct('syncNotifyOn'); else toast('Notifications are on.'); } return true; }
     if (act === 'syncNotifyOff') { await notifyOff(); render(); toast('Notifications are off on this phone.'); return true; }
     if (act === 'syncNotifyTest') { await notifyTest(); toast('Test sent. It should show up in a few seconds.'); return true; }
     if (act === 'syncOffYes') { await syncStop(false); closeSheet(); render(); toast('Sharing is off on this phone.'); return true; }

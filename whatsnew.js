@@ -4,6 +4,12 @@
    Every release adds an entry here, in plain words: added, changed, fixed, removed. */
 const CHANGELOG = [
   {
+    v: '2.0.1', date: '2026-10-31',
+    added: ['If notifications aren\'t on for this phone, a pop-up offers a one-button setup each time the app opens.',
+      'If they were turned off in iPhone Settings, the pop-up says exactly where to turn them back on.',
+      'When one person\'s phone has notifications off, the other person gets a notification about it (once a day).']
+  },
+  {
     v: '2.0.0', date: '2026-10-31',
     added: ['Spending watch: every purchase is sorted (groceries, fuel, eating out, snacks and drinks, alcohol, entertainment, household).',
       'Weekly limits for eating out, snacks and drinks, alcohol and entertainment, with a meter on Home. Both phones get a notification at 75% and when a limit is passed, plus a report on Sunday evening.',
