@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's available to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '1.4.0';
+const APP_VERSION = '1.4.1';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -334,16 +334,25 @@ function applyBank(j, now) {
     const sv = accts.find(a => /sav/i.test(a.name) && a.id !== S.bank.checkingId);
     S.bank.savingsId = sv ? sv.id : null;
   }
-  const pick = id => { const a = accts.find(x => x.id === id); return a ? (a.available != null && !isNaN(a.available) ? a.available : a.balance) : null; };
-  S.bank.bal = { checking: pick(S.bank.checkingId), savings: S.bank.savingsId ? pick(S.bank.savingsId) : null, at: now };
   const ch = raw.find(a => String(a.id) === S.bank.checkingId);
   S.bank.tx = ((ch && ch.transactions) || []).map(t => ({
     id: String(t.id),
     date: t.posted ? localDate(t.posted) : t.transacted_at ? localDate(t.transacted_at) : today(),
     amount: parseFloat(t.amount),
     desc: normText(t.description || t.payee || t.memo),
-    pending: !!t.pending
+    pending: !!t.pending || !t.posted
   })).filter(t => !isNaN(t.amount)).sort((a, b) => b.date.localeCompare(a.date));
+  /* Pending transactions count as real ones. The bank's "available" balance normally already includes them;
+     if the bank doesn't send one, apply the pending transactions to the posted balance ourselves. */
+  const pendingSum = sum(S.bank.tx.filter(t => t.pending).map(t => t.amount));
+  const pick = id => { const a = accts.find(x => x.id === id); return a ? (a.available != null && !isNaN(a.available) ? a.available : a.balance) : null; };
+  const cA = accts.find(x => x.id === S.bank.checkingId);
+  const hasAvail = cA && cA.available != null && !isNaN(cA.available);
+  S.bank.bal = {
+    checking: cA ? (hasAvail ? cA.available : cA.balance + pendingSum) : null,
+    savings: S.bank.savingsId ? pick(S.bank.savingsId) : null,
+    posted: cA ? cA.balance : null, available: hasAvail ? cA.available : null, pendingSum, at: now
+  };
   runMatching();
 }
 
@@ -1022,11 +1031,14 @@ function sheetBankBalances() {
   const pays = inTransitPays(), spends = inTransitSpends();
   openSheet(`<h3>Balances</h3><p class="hint">These come from ${esc(bankName())} automatically, updated ${timeAgo(S.bank.bal.at)}.</p>
     <div class="breakdown num" style="font-size:15px">
-      <div><span>Checking at ${esc(bankName())}</span><span>${fm(S.bank.bal.checking)}</span></div>
+      ${S.bank.bal.posted != null ? `<div class="muted"><span>Posted balance</span><span>${fm(S.bank.bal.posted)}</span></div>` : ''}
+      <div class="muted"><span>Pending transactions</span><span>${S.bank.bal.pendingSum < 0 ? '−' : ''}${fm(Math.abs(S.bank.bal.pendingSum || 0))}</span></div>
+      <div><span>Available at ${esc(bankName())}${S.bank.bal.available != null ? '' : ' (posted + pending)'}</span><span>${fm(S.bank.bal.checking)}</span></div>
       ${pays.map(p => `<div><span>${esc((findB(p.billId) || {}).name || 'Bill')}, paid ${nice(p.paidOn)}, not at the bank yet</span><span>−${fm(p.amount)}</span></div>`).join('')}
       ${spends.map(x => `<div><span>${esc(x.what)}, ${nice(x.date)}, not at the bank yet</span><span>−${fm(x.amount)}</span></div>`).join('')}
       <div class="sum"><span>Checking used by the app</span><span>${fm(checkingNow())}</span></div>
       <div class="muted"><span>Savings</span><span>${fm(savingsNow())}</span></div></div>
+    <p class="hint">Pending transactions count as real ones. "Available" should match the available balance in your bank's own app.</p>
     <p class="hint">Payments you mark paid in the app are subtracted until they show up at the bank (usually 3-5 business days), then they are matched automatically.</p>
     <div class="btns"><button class="btn ghost" data-act="close">Done</button><button class="btn" data-act="bankRefresh">Update now</button></div>`);
 }
