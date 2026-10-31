@@ -121,6 +121,12 @@ button.card.row { border-top: 0; }
 .fq-total { font-size: 30px; font-weight: 800; margin-top: 2px; }
 .fq-rest { margin-top: 10px; padding: 8px 10px; border-radius: 10px; background: var(--chip); }
 .who-unknown { color: var(--warn); text-decoration: underline; }
+/* Tappable lines in the meter, and the list of purchases behind a total */
+.meter-link { display: block; color: inherit; text-decoration: none; }
+.meter-more { opacity: .5; font-weight: 800; }
+.who-link { color: inherit; text-decoration: underline; }
+.sp-item { display: block; color: inherit; text-decoration: none; border-top: 1px solid var(--line); padding: 10px 0; }
+.sp-line { display: flex; justify-content: space-between; gap: 10px; }
 .fix-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 8px; }
 .fix-grid .btn { padding: 0 6px; }
 .sheet-must { font-size: 12px; font-weight: 700; color: var(--warn); text-transform: uppercase; letter-spacing: .04em; }

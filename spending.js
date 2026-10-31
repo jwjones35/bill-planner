@@ -43,9 +43,11 @@ const billIsFun = b => (b.fun != null ? !!b.fun : FUN_BILLS.test(normText(b.name
 const storeKind = desc => { for (const [k, re] of STORE_RULES) if (re.test(desc)) return k; return null; };
 // A bank charge's category: the user's choice for that store first, then the store rules.
 function txCat(t) {
+  const ed = txEd(t);
+  if (ed.cat) return ed.cat === 'none' ? null : ed.cat; // changed by hand for this one purchase
   const l = labelFor(t);
   if (l && l.ignore) return null;
-  const own = l && catKey(l.cat);
+  const own = l && (l.cat === 'station' ? 'station' : catKey(l.cat));
   if (own) return own;
   return storeKind(t.desc) || 'other';
 }
@@ -54,6 +56,7 @@ const STORE_NAMES = { CIRCLEK: 'Circle K', 'CIRCLE K': 'Circle K', CASEYS: "Case
   'SONIC DRIVE IN': 'Sonic', 'MCDONALD S': "McDonald's", MCDONALDS: "McDonald's", 'WAL MART': 'Walmart', WALMART: 'Walmart', 'DOLLAR GENERAL': 'Dollar General',
   'HARPS FOOD STOR': 'Harps', 'LOVE S': "Love's", LOVES: "Love's", '7 ELEVEN': '7-Eleven', ONCUE: 'OnCue', 'ON CUE': 'OnCue' };
 function storeName(t) {
+  if (txEd(t).store) return txEd(t).store;
   const l = labelFor(t); if (l && l.name) return l.name;
   const d = String(t.desc || '');
   for (const [k, v] of Object.entries(STORE_NAMES)) if ((' ' + d + ' ').includes(' ' + k + ' ') || d.startsWith(k)) return v;
@@ -73,42 +76,57 @@ const whoOfRecord = q => q.who || cardOwner(q.card) || null;
 const SHARED_BILLS = 'Shared bills';
 const UNKNOWN = 'Not known yet';
 function whoOfTx(t) {
-  const set = (S.txWho || {})[t.id]; if (set) return set; // tapped for this one purchase
+  const set = txEd(t).who || (S.txWho || {})[t.id]; if (set) return set; // set for this one purchase
   const q = (S.fuelQ || []).find(q => q.txId === t.id);
   return (q && whoOfRecord(q)) || cardOwner(cardOf(t.desc));
 }
+
+/* ---------- changes made by hand to one bank purchase ----------
+   S.txEdit[bank id] = { who, cat, store, date, amount }: only what was changed. The bank's own record is never
+   altered, so "Go back to what the bank shows" always works. */
+const txEd = t => (S && S.txEdit && S.txEdit[t.id]) || {};
+const txDate = t => txEd(t).date || t.date;
+const txAmt = t => (txEd(t).amount != null ? txEd(t).amount : -t.amount);
 
 /* ---------- spending in a date range ---------- */
 // Bank charges that are spending (not bill payments, not their fees, not marked "not spending").
 function spendingTx(from, to) {
   if (!bankOn()) return [];
   const billTx = new Set(S.payments.flatMap(p => [p.txId, p.feeTxId]).concat(S.bank.suggest.flatMap(s => [s.txId, s.feeTxId, s.smallId])).filter(Boolean));
-  return S.bank.tx.filter(t => t.amount < 0 && t.date >= from && t.date < to && !billTx.has(t.id) && txCat(t) !== null);
+  return S.bank.tx.filter(t => t.amount < 0 && txDate(t) >= from && txDate(t) < to && !billTx.has(t.id) && txCat(t) !== null);
 }
-// Totals per category and per person. Gas-station charges are split into fuel and snacks.
-function spendSummary(from, to) {
-  const cats = {}, byWho = {}, unsplit = [];
-  const add = (cat, amt, who) => {
-    if (amt < 0.005) return;
-    cats[cat] = (cats[cat] || 0) + amt;
-    const w = who || UNKNOWN;
-    byWho[w] = byWho[w] || {}; byWho[w][cat] = (byWho[w][cat] || 0) + amt;
-  };
-  const splits = stationSplits();
+/* Every piece of spending in a date range, each with where its number came from. The totals on Home are added up
+   from exactly this list, so the breakdown behind a total always matches it.
+   Gas-station charges become two pieces: fuel and snacks. */
+function spendItems(from, to) {
+  const items = [], unsplit = [], splits = stationSplits();
+  const push = o => { if (o.amt >= 0.005) items.push(o); };
   for (const t of spendingTx(from, to)) {
-    const amt = -t.amount, cat = txCat(t), who = whoOfTx(t);
-    if (cat !== 'station') { add(cat, amt, who); continue; }
+    const amt = txAmt(t), cat = txCat(t), who = whoOfTx(t), base = { src: 'tx', t, id: t.id, date: txDate(t), name: storeName(t), who };
+    if (cat !== 'station') { push(Object.assign({ cat, amt }, base)); continue; }
     const s = splits.get(t.id);
     if (!s) { unsplit.push({ t, amt, who }); continue; }
-    if (s.unrecognized) { add('other', amt, who); continue; }
-    add('fuel', s.fuel, who); add('snacks', s.snacks, who);
+    if (s.unrecognized) { push(Object.assign({ cat: 'other', amt }, base)); continue; }
+    push(Object.assign({ cat: 'fuel', amt: s.fuel, part: 'fuel', s, total: amt }, base));
+    push(Object.assign({ cat: 'snacks', amt: s.snacks, part: 'snacks', s, total: amt }, base));
   }
-  for (const x of S.spending.filter(x => !x.txId && x.date >= from && x.date < to)) add(catKey(x.what) || 'other', x.amount, x.who || null);
+  for (const x of S.spending.filter(x => !x.txId && x.date >= from && x.date < to))
+    push({ src: 'hand', x, id: x.id, cat: catKey(x.what) || 'other', amt: x.amount, who: x.who || null, date: x.date, name: x.note || x.what });
   // Entertainment bills (streaming) paid this week count toward the entertainment limit too.
   // (They are still bills for "Available to spend"; this only reports them here.)
   for (const p of S.payments) {
     const d = p.paidOn || p.due, b = findB(p.billId);
-    if (d >= from && d < to && b && billIsFun(b)) add('fun', p.amount, SHARED_BILLS);
+    if (d >= from && d < to && b && billIsFun(b)) push({ src: 'bill', p, b, id: b.id, cat: 'fun', amt: p.amount, who: p.funWho || SHARED_BILLS, date: d, name: b.name });
+  }
+  return { items, unsplit };
+}
+// Totals per category and per person.
+function spendSummary(from, to) {
+  const cats = {}, byWho = {}, { items, unsplit } = spendItems(from, to);
+  for (const it of items) {
+    cats[it.cat] = (cats[it.cat] || 0) + it.amt;
+    const w = it.who || UNKNOWN;
+    byWho[w] = byWho[w] || {}; byWho[w][it.cat] = (byWho[w][it.cat] || 0) + it.amt;
   }
   const fun = sum(FUN_CATS.map(c => cats[c] || 0));
   return { cats, byWho, unsplit, fun };
@@ -127,18 +145,18 @@ function meterHtml() {
   const bars = FUN_CATS.map(c => {
     const spent = s.cats[c] || 0, lim = L[c] || 0, r = lim ? spent / lim : 0;
     const cls = r >= 1 ? 'over' : r >= 0.75 ? 'near' : 'ok';
-    return `<div class="meter-row"><div class="meter-top"><span>${CATS[c].name}</span><span class="num ${r >= 1 ? 'neg' : ''}">${fm(spent)}${lim ? ` <span class="muted">of ${fm(lim)}</span>` : ''}</span></div>
-      <div class="meter-bar"><span class="meter-fill ${cls}" style="width:${Math.min(100, Math.round(r * 100))}%"></span></div></div>`;
+    return `<a href="#" class="meter-row meter-link" data-act="spDetail" data-cat="${c}"><div class="meter-top"><span>${CATS[c].name} <span class="meter-more">›</span></span><span class="num ${r >= 1 ? 'neg' : ''}">${fm(spent)}${lim ? ` <span class="muted">of ${fm(lim)}</span>` : ''}</span></div>
+      <div class="meter-bar"><span class="meter-fill ${cls}" style="width:${Math.min(100, Math.round(r * 100))}%"></span></div></a>`;
   }).join('');
   const who = Object.entries(s.byWho).map(([w, c]) => [w, sum(FUN_CATS.map(k => c[k] || 0))]).filter(([, v]) => v > 0.004);
   return `<h2>This week's fun spending<span class="tot num">${fm(s.fun)}</span></h2><div class="card pad meter">
-    <div class="small muted" style="margin-bottom:6px">Eating out, snacks and drinks, alcohol and entertainment since Monday${pct != null ? ` · <b>${pct}%</b> of a week's take-home pay` : ''}. Gas-station snacks are worked out automatically.</div>
+    <div class="small muted" style="margin-bottom:6px">Eating out, snacks and drinks, alcohol and entertainment since Monday${pct != null ? ` · <b>${pct}%</b> of a week's take-home pay` : ''}. Gas-station snacks are worked out automatically. <b>Tap any line to see every purchase behind it.</b></div>
     ${bars}
     ${who.length ? `<div class="small" style="margin-top:8px">${who.map(([w, v]) => w === UNKNOWN
       ? `<a href="#" data-act="whoUnknown" class="who-unknown"><b>${UNKNOWN}</b> ${fm(v)} (tap to sort)</a>`
-      : `<b>${esc(sameName(w, me()) ? 'Me' : w)}</b> ${fm(v)}`).join(' · ')}</div>` : ''}
+      : `<a href="#" data-act="spDetail" data-cat="allfun" data-who="${esc(w)}" class="who-link"><b>${esc(sameName(w, me()) ? 'Me' : w)}</b> ${fm(v)}</a>`).join(' · ')}</div>` : ''}
     ${s.unsplit.length ? `<div class="small muted" style="margin-top:6px">${s.unsplit.length} gas-station purchase${s.unsplit.length === 1 ? '' : 's'} (${fm(sum(s.unsplit.map(p => p.amt)))}) not split into fuel and snacks yet. ${vehicles().length ? (profile() ? 'They will be the next time the bank data updates.' : 'Add your name under More › Profile first.') : 'Add your vehicles under More › Spending watch.'}</div>` : ''}
-    <div class="btns" style="margin-top:8px"><button class="btn small ghost" data-act="spLimits">Weekly limits</button></div></div>`;
+    <div class="btns" style="margin-top:8px"><button class="btn small ghost" data-act="spDetail" data-cat="allfun">See every purchase</button><button class="btn small ghost" data-act="spLimits">Weekly limits</button></div></div>`;
 }
 
 /* ---------- vehicles and the gas price ---------- */
@@ -179,11 +197,11 @@ let splitCache = null, splitKey = '';
 function stationSplits() {
   const res = new Map(), vs = vehicles();
   if (!S || !vs.length) return res;
-  const key = JSON.stringify([S.fuelQ, vs, S.cards, gasPrice()]);
+  const key = JSON.stringify([S.fuelQ, vs, S.cards, S.txEdit, S.txWho, gasPrice()]);
   if (splitCache && key === splitKey) return splitCache;
   const groups = {};
   for (const q of S.fuelQ || []) {
-    const v = vehicleOf(whoOfRecord(q)); if (!v) continue;
+    const v = vehicleOf(((S.txEdit || {})[q.txId] || {}).who || (S.txWho || {})[q.txId] || whoOfRecord(q)); if (!v) continue;
     (groups[v.id] = groups[v.id] || { v, qs: [] }).qs.push(q);
   }
   const price = gasPrice();
@@ -192,8 +210,10 @@ function stationSplits() {
     const mpg = ((v.mpgLow || 18) + (v.mpgHigh || 20)) / 2, perDay = (v.milesPerDay || 30) / mpg * price, tankD = (v.tank || 20) * price;
     let burned = perDay * 5, last = qs.length ? qs[0].date : today(); // assume a few days' driving before the first stop
     for (const q of qs) {
+      const ed = (S.txEdit || {})[q.txId] || {};
+      if (ed.cat && ed.cat !== 'station') continue; // changed by hand: not a gas-station purchase
       burned = Math.min(burned + Math.max(0, diffDays(last, q.date)) * perDay, tankD); last = q.date;
-      const total = q.total;
+      const total = ed.amount != null ? ed.amount : q.total;
       if (q.unrecognized) { res.set(q.txId, { fuel: 0, snacks: 0, unrecognized: true, v }); continue; }
       let fuel, how;
       if (q.override != null) { fuel = Math.min(q.override, total); how = 'set'; }
@@ -435,6 +455,139 @@ function whoAssign(el) {
   sheetUnknownWho();
 }
 
+/* ---------- what's behind a total, and changing any of it ----------
+   Tapping a line in the weekly box lists every purchase that went into it, with where each number came from.
+   Tapping a purchase opens it to change who, what, where, when or how much. */
+let spCtx = { cat: 'allfun', who: '', wk: 0 };
+// The same purchase as the app would see it without any change made by hand.
+function withoutEdits(t, fn) {
+  const keepE = S.txEdit, keepW = S.txWho;
+  S.txEdit = Object.assign({}, keepE); delete S.txEdit[t.id];
+  S.txWho = Object.assign({}, keepW); delete S.txWho[t.id];
+  try { return fn(); } finally { S.txEdit = keepE; S.txWho = keepW; }
+}
+const catLabel = c => (c === 'station' ? 'Gas station (fuel and snacks worked out)' : c === 'none' ? 'Not spending (leave it out)' : CATS[c] ? CATS[c].name : c);
+function whoWhy(it) {
+  if (it.src === 'bill') return it.p.funWho ? 'set by hand' : 'a bill you both use';
+  if (it.src === 'hand') return it.who ? 'entered on their phone' : '';
+  const t = it.t;
+  if (txEd(t).who || (S.txWho || {})[t.id]) return 'set by hand';
+  const q = (S.fuelQ || []).find(q => q.txId === t.id);
+  if (q && q.who) return 'answered on the phone';
+  const c = cardOf(t.desc);
+  return c ? (cardOwner(c) ? `card ending ${c}` : `card ending ${c} isn't known yet`) : 'no card number shown';
+}
+function whatWhy(it) {
+  if (it.src === 'bill') return 'A bill payment that counts as entertainment.';
+  if (it.src === 'hand') return 'Entered by hand.';
+  const t = it.t, ed = txEd(t);
+  if (it.part) {
+    const s = it.s, est = s.how === 'set' ? 'set by tapping' : s.how === 'round' ? 'a round amount, so all counted as fuel'
+      : `worked out from the ${s.v.name}'s usual driving since its last stop`;
+    return `Gas-station charge of ${fm(it.total)}: ${fm(s.fuel)} counted as fuel (${est}), ${fm(s.snacks)} as snacks and drinks.`;
+  }
+  if (ed.cat) return 'Kind changed by hand.';
+  if (labelFor(t) && labelFor(t).cat) return 'Your choice for this store.';
+  return 'Sorted by the store name.';
+}
+function sheetSpendDetail(cat, who, wk) {
+  spCtx = { cat: cat || 'allfun', who: who || '', wk: wk || 0 };
+  const ws = addDays(weekStart(today()), 7 * spCtx.wk), we = addDays(ws, 7);
+  const all = spendItems(ws, we);
+  let items = all.items.filter(it => (spCtx.cat === 'allfun' ? FUN_CATS.includes(it.cat) : it.cat === spCtx.cat));
+  if (spCtx.who) items = items.filter(it => (it.who || UNKNOWN) === spCtx.who);
+  items.sort((a, b) => b.date.localeCompare(a.date) || b.amt - a.amt);
+  const total = sum(items.map(i => i.amt));
+  const title = (spCtx.cat === 'allfun' ? 'Fun spending' : CATS[spCtx.cat].name) + (spCtx.who ? ` · ${sameName(spCtx.who, me()) ? 'Me' : spCtx.who}` : '');
+  const when = spCtx.wk === 0 ? 'This week' : spCtx.wk === -1 ? 'Last week' : 'Week';
+  const unsplit = spCtx.cat === 'snacks' || spCtx.cat === 'allfun' ? all.unsplit : [];
+  openSheet(`<h3>${esc(title)}</h3>
+    <div class="small muted">${when}: ${nice(ws)} to ${nice(addDays(we, -1))}</div>
+    <div class="banner" style="margin-top:6px">${items.length} purchase${items.length === 1 ? ' adds' : 's add'} up to <b>${fm(total)}</b>. Tap one to change it.</div>
+    ${items.map(it => `<a href="#" class="sp-item" data-act="spEdit" data-src="${it.src}" data-id="${esc(it.id)}" data-due="${it.p ? it.p.due : ''}">
+      <div class="sp-line"><b>${esc(it.name)}</b><span class="num"><b>${fm(it.amt)}</b></span></div>
+      <div class="small">${nice(it.date)} · ${esc(it.who ? (sameName(it.who, me()) ? 'Me' : it.who) : UNKNOWN)}${whoWhy(it) ? ` <span class="muted">(${esc(whoWhy(it))})</span>` : ''}${spCtx.cat === 'allfun' ? ` · ${CATS[it.cat].name}` : ''}</div>
+      <div class="small muted">${esc(whatWhy(it))}${it.t ? ` Bank: "${esc(it.t.desc)}"` : ''}</div></a>`).join('') || '<p class="muted">Nothing here for this week.</p>'}
+    ${unsplit.length ? `<p class="small muted">Not counted yet: ${unsplit.length} gas-station purchase${unsplit.length === 1 ? '' : 's'} (${fm(sum(unsplit.map(u => u.amt)))}) waiting to be split into fuel and snacks.</p>` : ''}
+    <div class="btns"><button class="btn small ghost" data-act="spWeek" data-wk="${spCtx.wk - 1}">‹ Week before</button>${spCtx.wk < 0 ? `<button class="btn small ghost" data-act="spWeek" data-wk="${spCtx.wk + 1}">Week after ›</button>` : ''}</div>
+    <div class="btns"><button class="btn ghost block" data-act="close">Done</button></div>`);
+}
+const whoOpts = (cur, blank) => `<option value="">${esc(blank)}</option>` + people().map(n => `<option value="${esc(n)}"${sameName(n, cur) ? ' selected' : ''}>${esc(n)}</option>`).join('');
+const editBtns = extra => `${extra || ''}<div class="btns"><button type="button" class="btn ghost" data-act="spBack">Back</button><button class="btn">Save</button></div>`;
+function sheetPurchaseEdit(src, id, due) {
+  if (src === 'tx') {
+    const t = S.bank.tx.find(x => x.id === id); if (!t) return;
+    const ed = txEd(t), autoWho = withoutEdits(t, () => whoOfTx(t)), cat = txCat(t) || 'none';
+    const kinds = ['station', ...Object.keys(CATS), 'none'].filter(k => k !== 'station' || cat === 'station' || storeKind(t.desc) === 'station');
+    const edited = Object.keys(ed).length || (S.txWho || {})[t.id];
+    openSheet(`<form id="fSpEdit" data-src="tx" data-id="${esc(t.id)}"><h3>Change this purchase</h3>
+      <div class="small muted">As the bank shows it: ${nice(t.date)} · ${fm(-t.amount)}</div><div class="small"><b>${esc(t.desc)}</b></div>
+      <label for="seWho">Who</label><select id="seWho" name="who">${whoOpts(ed.who || (S.txWho || {})[t.id] || '', autoWho ? `Worked out: ${autoWho}` : UNKNOWN)}</select>
+      <label for="seCat">What</label><select id="seCat" name="cat">${kinds.map(k => `<option value="${k}"${k === cat ? ' selected' : ''}>${esc(catLabel(k))}</option>`).join('')}</select>
+      <label class="check"><input type="checkbox" name="remember"> Do the same for every purchase the bank shows as "${esc(phraseOf(t.desc))}"</label>
+      <label for="seStore">Where</label><input id="seStore" name="store" value="${esc(storeName(t))}">
+      <label for="seDate">When</label><input id="seDate" name="date" type="date" value="${txDate(t)}">
+      <label for="seAmt">How much${cat === 'station' ? ' (the whole charge)' : ''}</label><input id="seAmt" name="amount" inputmode="decimal" value="${money2(txAmt(t))}">
+      ${cat === 'station' ? `<div class="btns"><button type="button" class="btn small ghost" data-act="txWhat" data-id="${esc(t.id)}">Change how much of it was fuel</button></div>` : ''}
+      ${editBtns(edited ? `<div class="btns"><button type="button" class="btn small ghost" data-act="spEditReset" data-id="${esc(t.id)}">Undo my changes (go back to what the bank shows)</button></div>` : '')}</form>`);
+    return;
+  }
+  if (src === 'hand') {
+    const x = S.spending.find(s => s.id === id); if (!x) return;
+    const cat = catKey(x.what) || 'other';
+    openSheet(`<form id="fSpEdit" data-src="hand" data-id="${esc(x.id)}"><h3>Change this purchase</h3>
+      <div class="small muted">Entered by hand${x.who ? ` by ${esc(x.who)}` : ''}.</div>
+      <label for="seWho">Who</label><select id="seWho" name="who">${whoOpts(x.who || '', UNKNOWN)}</select>
+      <label for="seCat">What</label><select id="seCat" name="cat">${Object.keys(CATS).map(k => `<option value="${k}"${k === cat ? ' selected' : ''}>${CATS[k].name}</option>`).join('')}</select>
+      <label for="seStore">Where</label><input id="seStore" name="store" value="${esc(x.note || '')}">
+      <label for="seDate">When</label><input id="seDate" name="date" type="date" value="${x.date}">
+      <label for="seAmt">How much</label><input id="seAmt" name="amount" inputmode="decimal" value="${money2(x.amount)}">
+      ${editBtns()}</form>`);
+    return;
+  }
+  if (src === 'bill') {
+    const b = findB(id), p = b && S.payments.find(p => p.billId === id && p.due === due); if (!p) return;
+    openSheet(`<form id="fSpEdit" data-src="bill" data-id="${esc(id)}" data-due="${esc(due)}"><h3>${esc(b.name)}</h3>
+      <div class="small muted">Bill payment, ${nice(p.paidOn || p.due)} · ${fm(p.amount)}. The amount and date are changed in the bill itself.</div>
+      <label for="seWho">Who it's for</label><select id="seWho" name="who">${whoOpts(p.funWho || '', SHARED_BILLS + ' (you both use it)')}</select>
+      <label class="check"><input type="checkbox" name="fun"${billIsFun(b) ? ' checked' : ''}> Counts as entertainment</label>
+      ${editBtns()}</form>`);
+  }
+}
+function spendEditSave(f) {
+  const fd = new FormData(f), src = f.dataset.src, id = f.dataset.id;
+  const amount = Math.round(num(fd.get('amount')) * 100) / 100;
+  if (src !== 'bill' && !(amount > 0)) { formError(f, 'Enter how much it was, for example 12.50.', 'amount'); return; }
+  if (src === 'tx') {
+    const t = S.bank.tx.find(x => x.id === id); if (!t) return;
+    const ed = Object.assign({}, txEd(t)), cat = fd.get('cat'), store = String(fd.get('store') || '').trim(), date = fd.get('date');
+    const auto = withoutEdits(t, () => ({ cat: txCat(t) || 'none', store: storeName(t) }));
+    if (fd.get('who')) ed.who = fd.get('who'); else delete ed.who;
+    if (S.txWho && S.txWho[t.id]) { S.txWho = Object.assign({}, S.txWho); delete S.txWho[t.id]; }
+    if (fd.get('remember') === 'on') {
+      const phrase = phraseOf(t.desc), old = (S.bank.labels || []).find(l => l.words === phrase) || {};
+      const lab = cat === 'none' ? { words: phrase, name: old.name || '', ignore: true } : { words: phrase, name: old.name || '', cat: cat === 'station' ? 'station' : CATS[cat].name };
+      S.bank.labels = (S.bank.labels || []).filter(l => l.words !== phrase).concat([lab]);
+      delete ed.cat;
+    } else if (cat === auto.cat) delete ed.cat; else ed.cat = cat;
+    if (!store || store === auto.store) delete ed.store; else ed.store = store;
+    if (!date || date === t.date) delete ed.date; else ed.date = date;
+    if (Math.abs(amount + t.amount) < 0.005) delete ed.amount; else ed.amount = amount;
+    S.txEdit = Object.assign({}, S.txEdit, { [t.id]: ed });
+    if (!Object.keys(ed).length) delete S.txEdit[t.id];
+  } else if (src === 'hand') {
+    const x = S.spending.find(s => s.id === id); if (!x) return;
+    if (x.adjusted && amount !== x.amount) S.balances.checking = (S.balances.checking || 0) + x.amount - amount;
+    Object.assign(x, { who: fd.get('who') || null, what: CATS[fd.get('cat')].name, note: String(fd.get('store') || '').trim(), date: fd.get('date') || x.date, amount });
+  } else {
+    const b = findB(id), p = b && S.payments.find(p => p.billId === id && p.due === f.dataset.due); if (!p) return;
+    if (fd.get('who')) p.funWho = fd.get('who'); else delete p.funWho;
+    const fun = fd.get('fun') === 'on'; if (fun !== billIsFun(b)) b.fun = fun;
+  }
+  save(); render(); toast('Saved.');
+  sheetSpendDetail(spCtx.cat, spCtx.who, spCtx.wk);
+}
+
 /* ---------- one-time setup note ----------
    Settings prepared for the household (for example vehicles and cards) can be left in the sync storage. The first
    phone that opens the app picks them up (the note is deleted at that moment) and adds them; sharing then gives
@@ -468,6 +621,11 @@ function spendAct(act, el) {
     case 'whoSet': if (q) whoSet(q, el.dataset.name); return true;
     case 'whoUnknown': sheetUnknownWho(); return true;
     case 'whoAssign': whoAssign(el); return true;
+    case 'spDetail': sheetSpendDetail(el.dataset.cat, el.dataset.who, 0); return true;
+    case 'spWeek': sheetSpendDetail(spCtx.cat, spCtx.who, Number(el.dataset.wk) || 0); return true;
+    case 'spEdit': sheetPurchaseEdit(el.dataset.src, el.dataset.id, el.dataset.due); return true;
+    case 'spBack': sheetSpendDetail(spCtx.cat, spCtx.who, spCtx.wk); return true;
+    case 'spEditReset': { const id = el.dataset.id; S.txEdit = Object.assign({}, S.txEdit); delete S.txEdit[id]; if (S.txWho && S.txWho[id]) { S.txWho = Object.assign({}, S.txWho); delete S.txWho[id]; } save(); render(); toast('Back to what the bank shows.'); sheetSpendDetail(spCtx.cat, spCtx.who, spCtx.wk); return true; }
     case 'whoShared': if (q) { S.cards = Object.assign({}, S.cards, { [q.card]: SHARED }); save(); sheetWho(q); } return true;
     case 'fqUnknown': if (q) fqUnknown(q); return true;
     case 'fqUnknownYes': if (q) fqUnknownYes(q); return true;
@@ -485,6 +643,7 @@ function spendAct(act, el) {
 }
 function spendSubmit(f) {
   const fd = new FormData(f);
+  if (f.id === 'fSpEdit') { spendEditSave(f); return true; }
   if (f.id === 'fLimits') { S.limits = Object.fromEntries(FUN_CATS.map(c => [c, num(fd.get(c)) || 0])); save(); closeSheet(); render(); toast('Weekly limits saved.'); return true; }
   if (f.id === 'fVehicle') {
     const name = String(fd.get('name') || '').trim(); if (!name) { formError(f, 'Give the vehicle a name.', 'name'); return true; }

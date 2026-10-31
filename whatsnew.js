@@ -4,6 +4,14 @@
    Every release adds an entry here, in plain words: added, changed, fixed, removed. */
 const CHANGELOG = [
   {
+    v: '2.2.5', date: '2026-11-01',
+    added: [
+      'On Home, tap any line in the fun-spending box (Eating out, Snacks & drinks, Alcohol, Entertainment, or a name) to see every purchase behind that total, and where each number came from.',
+      'Tap a purchase in that list to change who, what, where, when or how much. "Undo my changes" puts it back to what the bank shows. Changes show on both phones.',
+      'Gas-station purchases show how much was counted as fuel and how much as snacks, and why.'
+    ]
+  },
+  {
     v: '2.2.4', date: '2026-11-01',
     added: ['On Home, "Not known yet" in the fun-spending box can now be tapped. It lists each purchase the app could not match to a person, and one tap on a name sorts it. Tapping a name for a card remembers that card for every purchase after it.'],
     fixed: ['Streaming and game bills (Netflix, Blizzard and the like) used to count as "Not known yet". They now show as "Shared bills", because you both use them.']
