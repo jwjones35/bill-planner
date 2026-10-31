@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Bill Planner</title>
+<meta name="description" content="Bills, paydays and what's safe to spend. Your data stays on your device.">
+<meta name="theme-color" content="#0f6e5a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Bills">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<main id="view" aria-live="polite"></main>
+<nav id="tabs" aria-label="Sections">
+  <button data-act="tab" data-tab="home"><span class="ti">&#8962;</span>Home</button>
+  <button data-act="tab" data-tab="pay"><span class="ti">&#36;</span>Paydays</button>
+  <button data-act="tab" data-tab="bills"><span class="ti">&#9776;</span>Bills</button>
+  <button data-act="tab" data-tab="more"><span class="ti">&#8943;</span>More</button>
+</nav>
+<div id="scrim" data-act="close" hidden></div>
+<section id="sheet" role="dialog" aria-modal="true" hidden></section>
+<div id="toast" role="status" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>

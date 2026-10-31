@@ -1,0 +1,12 @@
+# This repo is PUBLIC (GitHub Pages). Personal data must never be committed.
+*.csv
+*backup*.json
+*starter*.json
+*private*
+_dev/data/
+
+# Windows clutter
+Thumbs.db
+desktop.ini
+*.tmp
+*.log
