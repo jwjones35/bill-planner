@@ -4,6 +4,15 @@
    Every release adds an entry here, in plain words: added, changed, fixed, removed. */
 const CHANGELOG = [
   {
+    v: '2.2.0', date: '2026-10-31',
+    changed: ['Gas-station purchases are now split into fuel and snacks automatically, with no typing.',
+      'A round-dollar charge ($20.00, $30.00) counts as fuel paid at the counter. Other amounts count as fuel up to what that vehicle has burned since its last stop (its usual miles a day, its miles per gallon and the current gas price); the rest counts as snacks and drinks.',
+      'The only question left is a one-tap "Whose card is this?" the first time a new card is used.',
+      'If a split looks wrong, tap the purchase on Home and pick how much was fuel (one tap).'],
+    removed: ['The "How much was fuel?" question, the fuel-cost box, and the reminders to answer it.',
+      'Gallons, odometer and "filled the tank" entries.']
+  },
+  {
     v: '2.1.1', date: '2026-10-31',
     changed: ['The gas price now comes from the U.S. government\'s free weekly average for Oklahoma\'s and Arkansas\'s regions, so no card or sign-up with Google is needed.']
   },

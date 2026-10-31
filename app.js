@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's available to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '2.1.1';
+const APP_VERSION = '2.2.0';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -1080,8 +1080,8 @@ function viewHome() {
     const n = bankSpend.length + handSpend.length;
     h += `<details class="card" style="margin-top:10px"><summary class="row"><span class="main"><div class="name">Spending since ${nice(since)}</div><div class="sub">${n} purchase${n === 1 ? '' : 's'}${bankOn() ? ` · from ${esc(bankName())}` : ''} · tap to see</div></span><span class="amt num">${fm(total)}</span></summary>
       ${handSpend.map(x => `<button class="row" data-act="spendEdit" data-id="${x.id}"><span class="dot ok"></span><span class="main"><div class="name">${esc(x.what)}${x.note ? ` <span class="muted" style="font-weight:400">· ${esc(x.note)}</span>` : ''}</div><div class="sub">${nice(x.date)} · ${x.cash ? 'cash, entered by hand' : 'entered by hand' + (bankOn() ? ', not at the bank yet' : '')}</div></span><span class="amt num">${fm(x.amount)}</span></button>`).join('')}
-      ${bankSpend.map(t => { const l = labelFor(t), ck = txCat(t), who = whoOfTx(t), q = (S.fuelQ || []).find(q => q.txId === t.id);
-        const catTag = ck === 'station' ? (q && q.answer ? (q.answer.unrecognized ? 'Not recognized' : q.answer.none ? 'Snacks & drinks' : `Fuel ${fm(q.answer.fuel)} + snacks ${fm(Math.max(0, -t.amount - q.answer.fuel))}`) : 'Gas station') : ck ? CATS[ck].name : '';
+      ${bankSpend.map(t => { const l = labelFor(t), ck = txCat(t), who = whoOfTx(t);
+        const catTag = ck === 'station' ? stationTag(t) : ck ? CATS[ck].name : '';
         return `<button class="row" data-act="txWhat" data-id="${esc(t.id)}"><span class="dot ${t.pending ? 'soon' : 'ok'}"></span><span class="main"><div class="name">${esc(txName(t))}${catTag ? ` <span class="tag${ck && CATS[ck] && CATS[ck].fun ? ' warn' : ''}">${esc(catTag)}</span>` : ''}${who ? ` <span class="tag">${esc(sameName(who, (profile() || {}).name) ? 'Me' : who)}</span>` : ''}</div><div class="sub">${nice(t.date)}${t.pending ? ' · pending' : ''}${linked.has(t.id) ? ' · also entered by hand' : ''}${feeOf[t.id] ? ` · includes ${fm(-feeOf[t.id].amount)} fee` : ''}${l && l.name ? ` · bank: ${esc(t.desc)}` : ' · tap to name it'}</div></span><span class="amt num">${fm(-t.amount + (feeOf[t.id] ? -feeOf[t.id].amount : 0))}</span></button>`; }).join('')}
     </details>`;
   }
@@ -1838,7 +1838,7 @@ document.addEventListener('click', e => {
       if (a) a.seen = true;
       save(); render(); break;
     }
-    case 'txWhat': { const t = S.bank.tx.find(x => x.id === id); if (t) sheetTxWhat(t); break; }
+    case 'txWhat': { const t = S.bank.tx.find(x => x.id === id); if (t) { if (fuelOn() && txCat(t) === 'station') sheetStationFix(t); else sheetTxWhat(t); } break; }
     case 'sugYes': {
       const i = Number(el.dataset.i), s = S.bank.suggest[i];
       if (s && s.kind === 'fee') {

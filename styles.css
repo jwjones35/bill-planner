@@ -120,6 +120,8 @@ button.card.row { border-top: 0; }
 .fq-store { font-size: 18px; font-weight: 700; margin-top: 2px; }
 .fq-total { font-size: 30px; font-weight: 800; margin-top: 2px; }
 .fq-rest { margin-top: 10px; padding: 8px 10px; border-radius: 10px; background: var(--chip); }
+.fix-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 8px; }
+.fix-grid .btn { padding: 0 6px; }
 .sheet-must { font-size: 12px; font-weight: 700; color: var(--warn); text-transform: uppercase; letter-spacing: .04em; }
 
 /* Hero: safe to spend */
