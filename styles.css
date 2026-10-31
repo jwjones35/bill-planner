@@ -1,38 +1,44 @@
+/* Colors: deep, saturated "inked comic" tones. Light mode is warm paper with ink-navy text;
+   dark mode is deep indigo ink with jewel-toned teal, emerald, crimson and gold. */
 :root {
-  --bg: #f3f5f4;
-  --card: #ffffff;
-  --text: #15201c;
-  --muted: #5d6b66;
-  --line: #e1e6e3;
-  --brand: #0f6e5a;
+  --bg: #f3ede2;
+  --card: #fffcf6;
+  --card-2: #f7efff;
+  --text: #1a1433;
+  --muted: #5c5577;
+  --line: #e2d9c8;
+  --brand: #007a68;
+  --brand-2: #0a5f8f;
   --brand-ink: #ffffff;
-  --good: #137a3f;
-  --bad: #c2332b;
-  --warn: #9a6200;
-  --warn-bg: #fff4dc;
-  --bad-bg: #fde9e7;
-  --good-bg: #e3f4ea;
-  --chip: #edf1ef;
-  --shadow: 0 1px 2px rgba(0,0,0,.06), 0 2px 8px rgba(0,0,0,.04);
+  --good: #0f8a3c;
+  --bad: #c8102e;
+  --warn: #b25e00;
+  --warn-bg: #ffecc2;
+  --bad-bg: #ffdfe3;
+  --good-bg: #d6f3df;
+  --chip: #ece3d3;
+  --shadow: 0 1px 0 rgba(26,20,51,.06), 0 4px 14px rgba(26,20,51,.08);
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #0e1412;
-    --card: #18201d;
-    --text: #e8eeeb;
-    --muted: #97a59f;
-    --line: #26302c;
-    --brand: #38b38f;
-    --brand-ink: #06231b;
-    --good: #4ccf83;
-    --bad: #ff7b70;
-    --warn: #f0b44c;
-    --warn-bg: #2e2412;
-    --bad-bg: #351a18;
-    --good-bg: #13291d;
-    --chip: #222b28;
-    --shadow: none;
+    --bg: #110d22;
+    --card: #1c1636;
+    --card-2: #241b4a;
+    --text: #f4effd;
+    --muted: #a99fcb;
+    --line: #2f2758;
+    --brand: #1fd1aa;
+    --brand-2: #4aa8ff;
+    --brand-ink: #04201a;
+    --good: #35e07f;
+    --bad: #ff4763;
+    --warn: #ffb52e;
+    --warn-bg: #3a2608;
+    --bad-bg: #3e0e22;
+    --good-bg: #0b3324;
+    --chip: #2b2350;
+    --shadow: 0 2px 0 rgba(0,0,0,.35), 0 8px 24px rgba(0,0,0,.35);
     color-scheme: dark;
   }
 }
@@ -74,8 +80,9 @@ button.card.row { border-top: 0; }
 .pad { padding: 14px 16px; }
 
 /* The one-line status at the top of Home: green, amber or red */
-.status { display: flex; gap: 12px; align-items: flex-start; padding: 14px 16px; border-radius: 14px; margin-bottom: 10px; border: 2px solid; }
-.status-dot { width: 14px; height: 14px; border-radius: 50%; flex: none; margin-top: 4px; }
+.status { display: flex; gap: 12px; align-items: flex-start; padding: 14px 16px; border-radius: 14px; margin-bottom: 10px; border: 2px solid; box-shadow: var(--shadow); }
+.status-dot { width: 14px; height: 14px; border-radius: 50%; flex: none; margin-top: 4px; box-shadow: 0 0 0 3px rgba(255,255,255,.12), 0 0 12px currentColor; }
+.status-good .status-dot { color: var(--good); } .status-warn .status-dot { color: var(--warn); } .status-bad .status-dot { color: var(--bad); }
 .status-title { font-size: 19px; font-weight: 700; line-height: 1.25; }
 .status-text { font-size: 14px; margin-top: 3px; color: var(--text); }
 .status-good { background: var(--good-bg); border-color: var(--good); }
@@ -86,7 +93,13 @@ button.card.row { border-top: 0; }
 .status-bad .status-dot { background: var(--bad); } .status-bad .status-title { color: var(--bad); }
 
 /* Hero: safe to spend */
-.hero { padding: 18px 16px 14px; }
+.hero {
+  padding: 18px 16px 14px;
+  /* A deep two-tone wash with a jewel-colored edge, so the main number reads as the hero panel */
+  background: linear-gradient(150deg, var(--card) 0%, var(--card) 45%, var(--card-2) 100%);
+  border-top: 3px solid var(--brand);
+}
+.hero .big { color: var(--text); text-shadow: 0 2px 0 rgba(0,0,0,.12); }
 .hero .label { color: var(--muted); font-size: 14px; }
 .hero .big { font-size: 42px; font-weight: 700; letter-spacing: -.02em; margin: 2px 0 4px; }
 .hero details { margin-top: 8px; }
@@ -147,11 +160,15 @@ button.card.row { border-top: 0; }
 .btn {
   display: inline-flex; align-items: center; justify-content: center;
   min-height: 44px; padding: 0 16px; border-radius: 12px; border: 0;
-  background: var(--brand); color: var(--brand-ink);
+  background: linear-gradient(180deg, var(--brand), color-mix(in srgb, var(--brand) 78%, #000));
+  color: var(--brand-ink);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.18), 0 2px 0 color-mix(in srgb, var(--brand) 55%, #000);
   font-family: inherit; font-size: 16px; font-weight: 600; line-height: 1; cursor: pointer;
 }
-.btn.ghost { background: var(--chip); color: var(--text); }
-.btn.danger { background: var(--bad-bg); color: var(--bad); }
+.btn:active { transform: translateY(1px); box-shadow: inset 0 1px 0 rgba(255,255,255,.12); }
+.btn.ghost { background: var(--chip); color: var(--text); box-shadow: none; }
+.btn.danger { background: var(--bad-bg); color: var(--bad); box-shadow: none; }
+.btn:disabled { opacity: .45; }
 .btn.small { min-height: 34px; padding: 0 12px; font-size: 14px; border-radius: 10px; }
 .btn.block { width: 100%; }
 .btns { display: flex; gap: 10px; margin-top: 16px; }
