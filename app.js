@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's available to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.4.0';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -114,15 +114,18 @@ const paidRec = (b, d) => S.payments.find(p => p.billId === b.id && p.due === d)
 const rcptRec = (inc, d) => S.receipts.find(r => r.incomeId === inc.id && r.date === d);
 
 // What a bill will probably cost: varying bills use the average of the last 3 payments.
+// v = the total expected (bill + any transaction fee), base = the bill alone, fee = the fee charged with it.
 function billAmt(b) {
+  const fee = b.fee || 0;
+  const out = (base, est, unknown) => ({ v: unknown ? 0 : base + fee, base: unknown ? 0 : base, fee, est, unknown: !!unknown });
   if (b.varies) {
     const ps = S.payments.filter(p => p.billId === b.id).sort((x, y) => y.due.localeCompare(x.due)).slice(0, 3);
-    if (ps.length) return { v: sum(ps.map(p => p.amount)) / ps.length, est: true };
-    if (b.amount != null) return { v: b.amount, est: true };
-    return { v: 0, unknown: true };
+    if (ps.length) return out(sum(ps.map(p => p.amount - (p.fee || 0))) / ps.length, true);
+    if (b.amount != null) return out(b.amount, true);
+    return out(0, false, true);
   }
-  if (b.amount == null) return { v: 0, unknown: true };
-  return { v: b.amount, est: false };
+  if (b.amount == null) return out(0, false, true);
+  return out(b.amount, false);
 }
 // What a paycheck will probably be: varying ones use the average of the last 4 received.
 function incAmt(inc) {
@@ -358,7 +361,7 @@ const savingsNow = () => (bankOn() && S.bank.bal.savings != null ? S.bank.bal.sa
 // Match bank transactions to bills and paychecks. Confirmed matches happen automatically; first-time ones are
 // offered for the user to confirm on Home.
 function runMatching() {
-  const used = new Set([...S.payments.map(p => p.txId), ...S.receipts.map(r => r.txId), ...S.spending.map(x => x.txId)].filter(Boolean));
+  const used = new Set([...S.payments.map(p => p.txId), ...S.payments.map(p => p.feeTxId), ...S.receipts.map(r => r.txId), ...S.spending.map(x => x.txId)].filter(Boolean));
   const ignore = new Set(S.bank.ignore || []);
   const free = t => !used.has(t.id) && !ignore.has(t.id);
   const suggest = [];
@@ -372,8 +375,19 @@ function runMatching() {
     const t = S.bank.tx.find(t => free(t) && t.amount < 0 && Math.abs(-t.amount - x.amount) < 0.01 && t.date >= addDays(x.date, -1) && t.date <= addDays(x.date, 7));
     if (t) { x.txId = t.id; used.add(t.id); }
   }
-  // 2. Money out: bill payments.
-  for (const t of S.bank.tx.filter(t => t.amount < 0 && free(t) && t.date >= addDays(S.setupDate, -3))) {
+  // A small charge from the same place on the same day as a bill's charge: its transaction fee.
+  const feeTxFor = (t, fee) => S.bank.tx.find(f => f.id !== t.id && free(f) && f.amount < 0 && Math.abs(diffDays(f.date, t.date)) <= 2 &&
+    phraseOf(f.desc) === phraseOf(t.desc) && (fee ? Math.abs(-f.amount - fee) <= 0.5 : -f.amount < -t.amount && -f.amount <= Math.max(10, -t.amount * 0.1)));
+  // 1b. A bill already marked paid whose fee charge showed up later.
+  for (const p of S.payments.filter(p => p.txId && !p.feeTxId)) {
+    const b = findB(p.billId), t = S.bank.tx.find(x => x.id === p.txId);
+    if (!b || !b.fee || !t) continue;
+    const f = feeTxFor(t, b.fee);
+    if (f) { p.feeTxId = f.id; p.fee = -f.amount; p.amount += -f.amount; used.add(f.id); }
+  }
+  // 2. Money out: bill payments. Bigger charges first, so a small fee isn't taken for the bill itself.
+  for (const t of S.bank.tx.filter(t => t.amount < 0 && t.date >= addDays(S.setupDate, -3)).sort((a, b) => a.amount - b.amount)) {
+    if (!free(t)) continue;
     const amt = -t.amount;
     let best = null;
     for (const b of S.bills) {
@@ -381,10 +395,11 @@ function runMatching() {
       for (const d of occ(b, from, addDays(t.date, 6))) {
         if (paidRec(b, d)) continue;
         const e = billAmt(b);
-        const diff = e.unknown ? null : Math.abs(amt - e.v);
-        const amtOk = e.unknown ? false : b.varies ? diff <= Math.max(5, e.v * 0.6) : diff <= 0.5;
+        // Compare with the bill alone: its fee arrives as a separate charge.
+        const diff = e.unknown ? null : Math.abs(amt - e.base);
+        const amtOk = e.unknown ? false : b.varies ? diff <= Math.max(5, e.base * 0.6) : diff <= 0.5;
         let c = null;
-        if (learned(b, t.desc) && (amtOk || b.varies || e.unknown)) c = { auto: true };
+        if (learned(b, t.desc) && (amtOk || e.unknown)) c = { auto: true };
         else if ((guessed(b, t.desc) && (amtOk || e.unknown)) || (!b.varies && !e.unknown && diff < 0.01)) c = { auto: false };
         if (!c) continue;
         c = Object.assign(c, { b, d, diff: diff == null ? 999 : diff, gap: Math.abs(diffDays(d, t.date)) });
@@ -392,10 +407,26 @@ function runMatching() {
       }
     }
     if (!best) continue;
+    // Its fee: expected (the bill has one), or a same-day small charge from the same place the user said to combine.
+    const rule = (S.bank.feeRules || []).includes(phraseOf(t.desc));
+    const f = best.b.fee ? feeTxFor(t, best.b.fee) : rule ? feeTxFor(t, 0) : null;
     if (best.auto) {
-      S.payments.push({ billId: best.b.id, due: best.d, paidOn: t.date, amount: amt, txId: t.id, auto: true });
+      const pay = { billId: best.b.id, due: best.d, paidOn: t.date, amount: amt, txId: t.id, auto: true };
+      if (f) { pay.fee = -f.amount; pay.amount += -f.amount; pay.feeTxId = f.id; used.add(f.id); if (!best.b.fee) best.b.fee = -f.amount; }
+      S.payments.push(pay);
       used.add(t.id); auto.push(best.b.name);
-    } else suggest.push({ kind: 'bill', txId: t.id, id: best.b.id, d: best.d });
+    } else {
+      suggest.push({ kind: 'bill', txId: t.id, id: best.b.id, d: best.d, feeTxId: f ? f.id : null });
+      if (f) used.add(f.id);
+    }
+  }
+  // 2b. Two same-day charges from the same place, one small, with no bill expecting a fee: ask whether to combine.
+  const noPair = new Set(S.bank.noFeePairs || []);
+  for (const t of S.bank.tx.filter(t => t.amount < 0 && t.date >= addDays(S.setupDate, -3))) {
+    const f = feeTxFor(t, 0);
+    if (!f || noPair.has(t.id + '+' + f.id) || (S.bank.feeRules || []).includes(phraseOf(t.desc))) continue;
+    if (suggest.some(s => s.txId === f.id || s.feeTxId === f.id || s.smallId === f.id)) continue;
+    suggest.push({ kind: 'fee', txId: t.id, smallId: f.id });
   }
   // 3. Money in: paychecks.
   for (const t of S.bank.tx.filter(t => t.amount > 0 && free(t) && t.date >= addDays(S.setupDate, -3))) {
@@ -424,17 +455,107 @@ function runMatching() {
   if (auto.length) S.bank.autoLog = [{ at: Date.now(), names: auto }].concat(S.bank.autoLog || []).slice(0, 10);
 }
 
+/* Readable names for bank transactions. The bank's own wording is kept for recognizing them;
+   the name is only what's shown. A label applies to every transaction containing its words. */
+function labelFor(t) {
+  const one = (S.bank.txNames || {})[t.id];
+  if (one) return one;
+  return (S.bank.labels || []).find(l => l.words && l.words.split(' ').every(w => hasWord(t.desc, w))) || null;
+}
+const txName = t => { const l = labelFor(t); return l && l.name ? l.name : t.desc; };
+
+function sheetTxWhat(t) {
+  const l = labelFor(t) || {};
+  const phrase = phraseOf(t.desc);
+  const opts = [];
+  if (t.amount < 0) {
+    opts.push(`<option value="spend">Everyday spending (groceries, gas, a purchase)</option>`);
+    for (const b of S.bills) for (const d of occ(b, addDays(t.date, -25), addDays(t.date, 25))) {
+      if (!paidRec(b, d)) opts.push(`<option value="bill|${b.id}|${d}">Payment for the bill: ${esc(b.name)} (due ${nice(d)})</option>`);
+    }
+    opts.push(`<option value="newbill">A bill that isn't in the app yet (set it up from this)</option>`);
+  } else {
+    opts.push(`<option value="spend">Money in (refund or other)</option>`);
+    for (const inc of S.incomes) for (const d of occ(inc, addDays(t.date, -10), addDays(t.date, 10))) {
+      if (!rcptRec(inc, d)) opts.push(`<option value="pay|${inc.id}|${d}">Paycheck: ${esc(inc.name)} (${nice(d)})</option>`);
+    }
+  }
+  opts.push(`<option value="ignore"${l.ignore ? ' selected' : ''}>Not spending (for example a transfer to savings)</option>`);
+  openSheet(`<form id="fTx" data-id="${esc(t.id)}"><h3>What is this?</h3>
+    <div class="small muted">${nice(t.date)}${t.pending ? ' · pending' : ''} · as the bank shows it:</div>
+    <div><b>${esc(t.desc)}</b> <span class="num">${fm(Math.abs(t.amount))}</span></div>
+    <label for="txKind">This is</label><select id="txKind" name="kind">${opts.join('')}</select>
+    <label for="txName">Name you see in the app</label><input id="txName" name="name" value="${esc(l.name || '')}" placeholder="For example: Water / sewer / trash">
+    <label for="txCat">Category</label><select id="txCat" name="cat">${SPEND_KINDS.map(k => `<option${l.cat === k ? ' selected' : ''}>${k}</option>`).join('')}</select>
+    <label class="check"><input type="checkbox" name="remember" checked> Use this for every transaction the bank shows as "${esc(phrase)}"</label>
+    <div class="btns">${cancelBtn}<button class="btn">Save</button></div></form>`);
+}
+
+/* Two bills on the same schedule from the same place, one much smaller (like a water bill and its $2.25
+   payment fee), are probably one bill plus a transaction fee. Offer to combine them. */
+function relatedBillPairs() {
+  const out = [];
+  const no = new Set(S.ignorePairs || []);
+  const live = S.bills.filter(b => b.active !== false && b.amount != null);
+  for (let i = 0; i < live.length; i++) for (let j = i + 1; j < live.length; j++) {
+    let a = live[i], b = live[j];
+    if (a.freq !== b.freq || (a.freq === 'monthly' ? a.day !== b.day : a.anchor !== b.anchor)) continue;
+    if (b.amount > a.amount) [a, b] = [b, a]; // a = bigger, b = smaller
+    if (b.amount <= 0 || b.amount > Math.max(10, a.amount * 0.1) || a.fee) continue;
+    const wa = nameWords(a.name), wb = nameWords(b.name);
+    const sharedName = wa.some(w => wb.includes(w));
+    const sharedBank = (a.match || []).some(m => (b.match || []).includes(m));
+    if (!sharedName && !sharedBank) continue;
+    const key = [a.id, b.id].sort().join('+');
+    if (!no.has(key)) out.push({ big: a, small: b, key });
+  }
+  return out;
+}
+function combineBills(bigId, smallId) {
+  const big = findB(bigId), small = findB(smallId);
+  if (!big || !small) return;
+  big.fee = Math.round(((big.fee || 0) + (small.amount || 0)) * 100) / 100;
+  big.match = [...new Set([...(big.match || []), ...(small.match || [])])];
+  // Payments of the fee bill become the fee part of the main bill's payment on the same date, if there is one.
+  for (const p of S.payments.filter(p => p.billId === small.id)) {
+    const main = S.payments.find(q => q.billId === big.id && q.due === p.due);
+    if (main) { main.amount += p.amount; main.fee = (main.fee || 0) + p.amount; if (p.txId) main.feeTxId = p.txId; }
+  }
+  S.payments = S.payments.filter(p => p.billId !== small.id);
+  S.bills = S.bills.filter(b => b.id !== small.id);
+}
+
 // The user's answer to "is this the X bill?"
 function answerSuggestion(i, yes) {
   const s = S.bank.suggest[i];
   if (!s) return;
   const t = S.bank.tx.find(x => x.id === s.txId);
+  if (s.kind === 'fee') {
+    const small = S.bank.tx.find(x => x.id === s.smallId);
+    if (yes && t && small) {
+      S.bank.feeRules = [...new Set([...(S.bank.feeRules || []), phraseOf(t.desc)])];
+      const p = S.payments.find(q => q.txId === t.id);
+      if (p) {
+        p.fee = (p.fee || 0) - small.amount; p.amount += -small.amount; p.feeTxId = small.id;
+        const b = findB(p.billId); if (b && !b.fee) b.fee = -small.amount;
+      }
+      toast('Combined. From now on these will be treated as one charge plus its transaction fee.');
+    } else {
+      S.bank.noFeePairs = [...new Set([...(S.bank.noFeePairs || []), s.txId + '+' + s.smallId])].slice(-200);
+    }
+    S.bank.suggest.splice(i, 1);
+    runMatching(); save(); render();
+    return;
+  }
   if (yes && t) {
     if (s.kind === 'bill') {
       const b = findB(s.id);
-      S.payments.push({ billId: b.id, due: s.d, paidOn: t.date, amount: -t.amount, txId: t.id, auto: true });
+      const f = s.feeTxId && S.bank.tx.find(x => x.id === s.feeTxId);
+      const pay = { billId: b.id, due: s.d, paidOn: t.date, amount: -t.amount, txId: t.id, auto: true };
+      if (f) { pay.fee = -f.amount; pay.amount += -f.amount; pay.feeTxId = f.id; }
+      S.payments.push(pay);
       b.match = [...new Set([...(b.match || []), phraseOf(t.desc)])];
-      toast(`${b.name} marked paid. Future payments like this will be matched automatically.`);
+      toast(`${b.name} marked paid${f ? ', including its fee' : ''}. Future payments like this will be matched automatically.`);
     } else {
       const inc = findI(s.id);
       S.receipts.push({ incomeId: inc.id, date: s.d, amount: t.amount, txId: t.id, auto: true });
@@ -469,7 +590,7 @@ function billRow(x) {
   const late = !x.p && x.d < t;
   const soon = !x.p && !late && diffDays(t, x.d) <= 3;
   const dot = x.p ? 'paid' : late ? 'late' : soon ? 'soon' : 'ok';
-  const sub = x.p ? `Paid ${nice(x.p.paidOn || x.d)}` : `${nice(x.d)} · ${rel(x.d)}`;
+  const sub = (x.p ? `Paid ${nice(x.p.paidOn || x.d)}` : `${nice(x.d)} · ${rel(x.d)}`) + (x.b.fee ? ` · includes ${fm(x.b.fee)} fee` : '');
   return `<button class="row${x.p ? ' done' : ''}" data-act="pay" data-id="${x.b.id}" data-d="${x.d}">
     <span class="dot ${dot}"></span>
     <span class="main"><div class="name">${esc(x.b.name)}</div><div class="sub">${sub}</div></span>
@@ -492,13 +613,28 @@ function viewHome() {
   // Bank transactions that look like a bill payment or paycheck: ask once, then match automatically.
   // Shown right under the main number: until answered, a paid bill is counted as still due.
   let sugHtml = '';
+  for (const pr of relatedBillPairs().slice(0, 2)) {
+    sugHtml += `<div class="card pad" style="margin-top:12px"><div><b>These two bills look related</b></div>
+      <div class="small" style="margin-top:4px">${esc(pr.big.name)} (${fm(pr.big.amount)}) and ${esc(pr.small.name)} (${fm(pr.small.amount)}) are both ${freqText(pr.big).toLowerCase()}.</div>
+      <div class="small muted" style="margin-top:4px">Combine them into one bill, with the ${fm(pr.small.amount)} as its transaction fee? The total would be ${fm(pr.big.amount + pr.small.amount)}.</div>
+      <div class="btns" style="margin-top:8px"><button class="btn small ghost" data-act="pairNo" data-key="${pr.key}">Keep separate</button><button class="btn small" data-act="pairYes" data-big="${pr.big.id}" data-small="${pr.small.id}">Combine</button></div></div>`;
+  }
   if (bankOn() && S.bank.suggest.length) {
-    sugHtml = `<h2>Found at ${esc(bankName())}: please confirm</h2><div class="card">` + S.bank.suggest.slice(0, 5).map((s, i) => {
+    sugHtml += `<h2>Found at ${esc(bankName())}: please confirm</h2><div class="card">` + S.bank.suggest.slice(0, 5).map((s, i) => {
       const t = S.bank.tx.find(x => x.id === s.txId);
       if (!t) return '';
-      const what = s.kind === 'bill' ? `the <b>${esc((findB(s.id) || {}).name || '')}</b> bill due ${nice(s.d)}` : `the <b>${esc((findI(s.id) || {}).name || '')}</b> paycheck for ${nice(s.d)}`;
+      if (s.kind === 'fee') {
+        const sm = S.bank.tx.find(x => x.id === s.smallId);
+        if (!sm) return '';
+        return `<div class="pad" style="border-top:1px solid var(--line)"><div class="small muted">${nice(t.date)}</div>
+        <div><b>${esc(txName(t))}</b>: two charges, <span class="num">${fm(-t.amount)}</span> and <span class="num">${fm(-sm.amount)}</span></div>
+        <div class="small" style="margin-top:4px">Are these related? Combine them, with the ${fm(-sm.amount)} as a transaction fee for the ${fm(-t.amount)} charge?</div>
+        <div class="btns" style="margin-top:8px"><button class="btn small ghost" data-act="sugNo" data-i="${i}">Keep separate</button><button class="btn small" data-act="sugYes" data-i="${i}">Combine</button></div></div>`;
+      }
+      const f = s.feeTxId && S.bank.tx.find(x => x.id === s.feeTxId);
+      const what = s.kind === 'bill' ? `the <b>${esc((findB(s.id) || {}).name || '')}</b> bill due ${nice(s.d)}${f ? `, with the ${fm(-f.amount)} charge as its fee` : ''}` : `the <b>${esc((findI(s.id) || {}).name || '')}</b> paycheck for ${nice(s.d)}`;
       return `<div class="pad" style="border-top:1px solid var(--line)"><div class="small muted">${nice(t.date)}${t.pending ? ' · pending' : ''}</div>
-        <div><b>${esc(t.desc)}</b> <span class="num">${fm(Math.abs(t.amount))}</span></div>
+        <div><b>${esc(txName(t))}</b> <span class="num">${fm(Math.abs(t.amount))}</span>${f ? ` <span class="small muted">+ ${fm(-f.amount)}</span>` : ''}</div>
         <div class="small" style="margin-top:4px">Is this ${what}?</div>
         <div class="btns" style="margin-top:8px"><button class="btn small ghost" data-act="sugNo" data-i="${i}">No</button><button class="btn small" data-act="sugYes" data-i="${i}">Yes</button></div></div>`;
     }).join('') + `<div class="empty">Answering keeps the numbers above right. After the first time, the app recognizes these by itself.</div></div>`;
@@ -554,15 +690,25 @@ function viewHome() {
   // Spending since the last payday: from the bank when connected, plus anything recorded by hand.
   const since = lastPayday();
   const billTx = new Set(S.payments.map(p => p.txId).concat(S.bank.suggest.map(s => s.txId)).filter(Boolean));
-  const bankSpend = bankOn() ? S.bank.tx.filter(t => t.amount < 0 && t.date >= since && !billTx.has(t.id)) : [];
+  S.payments.forEach(p => { if (p.feeTxId) billTx.add(p.feeTxId); });
+  S.bank.suggest.forEach(s => { if (s.feeTxId) billTx.add(s.feeTxId); if (s.smallId) billTx.add(s.smallId); });
+  let bankSpend = bankOn() ? S.bank.tx.filter(t => t.amount < 0 && t.date >= since && !billTx.has(t.id) && !(labelFor(t) || {}).ignore) : [];
+  // Charges the user said to combine: show the main charge with its fee as one line.
+  const feeOf = {};
+  for (const t of bankSpend) {
+    if (!(S.bank.feeRules || []).includes(phraseOf(t.desc)) || feeOf[t.id] === null) continue;
+    const sm = bankSpend.find(f => f.id !== t.id && !(f.id in feeOf) && phraseOf(f.desc) === phraseOf(t.desc) && Math.abs(diffDays(f.date, t.date)) <= 2 && -f.amount < -t.amount && -f.amount <= Math.max(10, -t.amount * 0.1));
+    if (sm) { feeOf[t.id] = sm; feeOf[sm.id] = null; }
+  }
+  bankSpend = bankSpend.filter(t => feeOf[t.id] !== null);
   const linked = new Set(S.spending.map(x => x.txId).filter(Boolean));
   const handSpend = spendSince(since).filter(x => !x.txId);
   if (bankSpend.length || handSpend.length) {
-    const total = sum(bankSpend.map(t => -t.amount)) + sum(handSpend.map(x => x.amount));
+    const total = sum(bankSpend.map(t => -t.amount + (feeOf[t.id] ? -feeOf[t.id].amount : 0))) + sum(handSpend.map(x => x.amount));
     const n = bankSpend.length + handSpend.length;
     h += `<details class="card" style="margin-top:22px"><summary class="row"><span class="main"><div class="name">Spending since ${nice(since)}</div><div class="sub">${n} purchase${n === 1 ? '' : 's'}${bankOn() ? ` · from ${esc(bankName())}` : ''} · tap to see</div></span><span class="amt num">${fm(total)}</span></summary>
       ${handSpend.map(x => `<button class="row" data-act="spendEdit" data-id="${x.id}"><span class="dot ok"></span><span class="main"><div class="name">${esc(x.what)}${x.note ? ` <span class="muted" style="font-weight:400">· ${esc(x.note)}</span>` : ''}</div><div class="sub">${nice(x.date)} · ${x.cash ? 'cash, entered by hand' : 'entered by hand' + (bankOn() ? ', not at the bank yet' : '')}</div></span><span class="amt num">${fm(x.amount)}</span></button>`).join('')}
-      ${bankSpend.map(t => `<div class="row" style="cursor:default"><span class="dot ${t.pending ? 'soon' : 'ok'}"></span><span class="main"><div class="name">${esc(t.desc)}</div><div class="sub">${nice(t.date)}${t.pending ? ' · pending' : ''}${linked.has(t.id) ? ' · also entered by hand' : ''}</div></span><span class="amt num">${fm(-t.amount)}</span></div>`).join('')}
+      ${bankSpend.map(t => { const l = labelFor(t); return `<button class="row" data-act="txWhat" data-id="${esc(t.id)}"><span class="dot ${t.pending ? 'soon' : 'ok'}"></span><span class="main"><div class="name">${esc(txName(t))}${l && l.cat ? ` <span class="tag">${esc(l.cat)}</span>` : ''}</div><div class="sub">${nice(t.date)}${t.pending ? ' · pending' : ''}${linked.has(t.id) ? ' · also entered by hand' : ''}${feeOf[t.id] ? ` · includes ${fm(-feeOf[t.id].amount)} fee` : ''}${l && l.name ? ` · bank: ${esc(t.desc)}` : ' · tap to name it'}</div></span><span class="amt num">${fm(-t.amount + (feeOf[t.id] ? -feeOf[t.id].amount : 0))}</span></button>`; }).join('')}
     </details>`;
   }
 
@@ -790,15 +936,20 @@ function readFreq(fd) {
   else { const a = fd.get('anchor'); if (!a) return null; o.anchor = a; o.day = null; }
   return o;
 }
-function sheetBill(b) {
-  const x = b || { freq: 'monthly' };
+// draft: values to pre-fill a new bill (for example one made from a bank transaction).
+function sheetBill(b, draft) {
+  const x = b || draft || { freq: 'monthly' };
   const hist = b ? S.payments.filter(p => p.billId === b.id).sort((p, q) => q.due.localeCompare(p.due)).slice(0, 6) : [];
-  openSheet(`<form id="fBill" data-id="${b ? b.id : ''}">
+  openSheet(`<form id="fBill" data-id="${b ? b.id : ''}" data-tx="${esc((draft && draft.txId) || '')}" data-due="${esc((draft && draft.anchor) || '')}">
     <h3>${b ? 'Edit bill' : 'New bill'}</h3>
-    <label for="bName">Name</label><input id="bName" name="name" value="${esc(x.name || '')}" required>
+    <label for="bName">Name you see in the app</label><input id="bName" name="name" value="${esc(x.name || '')}" placeholder="For example: Water / sewer / trash" required>
     ${freqFields(x, 'b')}
     <label for="bAmt">Usual amount</label><input id="bAmt" name="amount" inputmode="decimal" value="${money2(x.amount)}" placeholder="Leave empty if you don't know yet">
+    <label for="bFee">Transaction fee charged with it</label><input id="bFee" name="fee" inputmode="decimal" value="${money2(x.fee)}" placeholder="Optional, for example 2.25">
+    <p class="hint">A small extra charge that comes with this bill on the same day. It's added to the bill's total.</p>
     <label class="check"><input type="checkbox" name="varies"${x.varies ? ' checked' : ''}> The amount changes (like electric or water)</label>
+    <label for="bMatch">How the bank shows it</label><input id="bMatch" name="match" value="${esc((x.match || []).join(', '))}" autocapitalize="characters" placeholder="Filled in when you confirm a bank payment">
+    <p class="hint">Words from the bank's description used to recognize this bill, for example TOWN MULDROW. Only used for matching; the name above is what you see. Separate several with commas.</p>
     <label class="check"><input type="checkbox" name="active"${x.active === false ? '' : ' checked'}> Still paying this</label>
     <label for="bNote">Note</label><input id="bNote" name="note" value="${esc(x.note || '')}" placeholder="Optional">
     ${hist.length ? `<label>Recent payments</label><div class="small num">${hist.map(p => `<div class="toolbar"><span>${nice(p.due)}</span><span>${fm(p.amount)}</span></div>`).join('')}</div>` : ''}
@@ -1062,6 +1213,14 @@ document.addEventListener('click', e => {
         save(); render(); toast('Bank disconnected. Balances are entered by hand again.');
       }
       break;
+    case 'pairYes': {
+      const big = findB(el.dataset.big), small = findB(el.dataset.small);
+      combineBills(el.dataset.big, el.dataset.small);
+      if (bankOn()) runMatching();
+      save(); render(); toast(`Combined: ${big.name} now includes a ${fm(big.fee)} transaction fee.`); break;
+    }
+    case 'pairNo': S.ignorePairs = [...new Set([...(S.ignorePairs || []), el.dataset.key])]; save(); render(); break;
+    case 'txWhat': { const t = S.bank.tx.find(x => x.id === id); if (t) sheetTxWhat(t); break; }
     case 'sugYes': answerSuggestion(Number(el.dataset.i), true); break;
     case 'sugNo': answerSuggestion(Number(el.dataset.i), false); break;
     case 'unrecv': {
@@ -1137,8 +1296,18 @@ document.addEventListener('submit', e => {
     }
     case 'fBill': {
       const fr = readFreq(fd); if (!fr) { toast(fd.get('freq') === 'monthly' ? 'Enter a day of the month (1-31).' : 'Pick the next date.'); return; }
-      const o = Object.assign({ name: fd.get('name').trim(), amount: num(fd.get('amount')), varies: fd.get('varies') === 'on', active: fd.get('active') === 'on', note: fd.get('note').trim() }, fr);
-      if (id) Object.assign(findB(id), o); else S.bills.push(Object.assign({ id: uid() }, o));
+      const match = String(fd.get('match') || '').split(',').map(normText).filter(Boolean);
+      const o = Object.assign({ name: fd.get('name').trim(), amount: num(fd.get('amount')), fee: num(fd.get('fee')) || 0, match, varies: fd.get('varies') === 'on', active: fd.get('active') === 'on', note: fd.get('note').trim() }, fr);
+      let bill;
+      if (id) bill = Object.assign(findB(id), o); else S.bills.push(bill = Object.assign({ id: uid() }, o));
+      // A new bill made from a bank transaction: that transaction is its first payment.
+      const tx = f.dataset.tx && S.bank.tx.find(t => t.id === f.dataset.tx);
+      if (!id && tx) {
+        const d = occ(bill, addDays(tx.date, -20), addDays(tx.date, 20)).sort((a, c) => Math.abs(diffDays(a, tx.date)) - Math.abs(diffDays(c, tx.date)))[0] || tx.date;
+        S.payments.push({ billId: bill.id, due: d, paidOn: tx.date, amount: -tx.amount, txId: tx.id, auto: true });
+        S.bank.suggest = S.bank.suggest.filter(s => s.txId !== tx.id);
+      }
+      if (bankOn()) runMatching();
       save(); closeSheet(); render(); toast('Bill saved.'); break;
     }
     case 'fInc': {
@@ -1201,6 +1370,42 @@ document.addEventListener('submit', e => {
         toast(`Connected to ${bankName()}.`);
         if (S.bank.accounts.length > 1) sheetAccounts();
       }).catch(e => { btn.disabled = false; btn.textContent = 'Connect'; toast(e.message); });
+      return;
+    }
+    case 'fTx': {
+      const t = S.bank.tx.find(x => x.id === f.dataset.id);
+      if (!t) { closeSheet(); return; }
+      const kind = fd.get('kind'), name = (fd.get('name') || '').trim(), cat = fd.get('cat'), phrase = phraseOf(t.desc);
+      const saveLabel = extra => {
+        const lab = Object.assign({ name, cat }, extra || {});
+        if (fd.get('remember') === 'on') {
+          S.bank.labels = (S.bank.labels || []).filter(x => x.words !== phrase).concat([Object.assign({ words: phrase }, lab)]);
+        } else {
+          S.bank.txNames = Object.assign({}, S.bank.txNames || {}, { [t.id]: lab });
+        }
+      };
+      if (kind === 'newbill') {
+        closeSheet();
+        sheetBill(null, { name: name || '', amount: -t.amount, freq: 'monthly', day: Number(t.date.slice(8)), match: [phrase], txId: t.id });
+        return;
+      }
+      if (kind.startsWith('bill|')) {
+        const [, bid, d] = kind.split('|'); const b = findB(bid);
+        S.payments.push({ billId: b.id, due: d, paidOn: t.date, amount: -t.amount, txId: t.id, auto: true });
+        b.match = [...new Set([...(b.match || []), phrase])];
+        toast(`${b.name} marked paid. Future payments like this will be matched automatically.`);
+      } else if (kind.startsWith('pay|')) {
+        const [, iid, d] = kind.split('|'); const inc = findI(iid);
+        S.receipts.push({ incomeId: inc.id, date: d, amount: t.amount, txId: t.id, auto: true });
+        inc.match = [...new Set([...(inc.match || []), phrase])];
+        toast(`${inc.name} marked received.`);
+      } else if (kind === 'ignore') {
+        saveLabel({ ignore: true }); toast('It will no longer count as spending.');
+      } else {
+        saveLabel(); toast(name ? `Saved as "${name}".` : 'Saved.');
+      }
+      S.bank.suggest = S.bank.suggest.filter(s => s.txId !== t.id);
+      runMatching(); save(); closeSheet(); render();
       return;
     }
     case 'fAccounts': {
