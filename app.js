@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's available to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '1.5.6';
+const APP_VERSION = '1.5.7';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -44,6 +44,7 @@ function freqText(x) {
   if (x.freq === 'weekly') return x.anchor ? `Every ${WDL[new Date(parseD(x.anchor)).getUTCDay()]}` : 'Every week';
   if (x.freq === 'biweekly') return x.anchor ? `Every other ${WDL[new Date(parseD(x.anchor)).getUTCDay()]}` : 'Every 2 weeks';
   if (x.freq === 'yearly') return x.anchor ? `Yearly on ${MO[Number(x.anchor.slice(5, 7)) - 1]} ${Number(x.anchor.slice(8))}` : 'Yearly';
+  if (x.freq === 'once') return x.anchor ? `One time, due ${nice(x.anchor)}` : 'One time';
   return '';
 }
 
@@ -105,6 +106,9 @@ function occ(item, from, to) {
       const d = `${y}-${pad(am)}-${pad(Math.min(ad, daysInMonth(y, am)))}`;
       if (d >= from && d < to) out.push(d);
     }
+  } else if (item.freq === 'once') {
+    // A one-time bill happens only on its date; once paid it drops off by itself.
+    if (item.anchor && item.anchor >= from && item.anchor < to) out.push(item.anchor);
   }
   if (item.endDate) return out.filter(d => d <= item.endDate);
   return out;
@@ -936,20 +940,22 @@ function viewBills() {
   const t = today();
   const rows = S.bills.map(b => {
     const next = dueList(lookback(), addDays(t, 400)).find(x => x.b.id === b.id);
-    return { b, next };
-  }).sort((x, y) => (x.b.active === false) - (y.b.active === false) || (x.next ? x.next.d : '9999').localeCompare(y.next ? y.next.d : '9999'));
+    // A one-time bill that's been paid is finished: shown at the bottom, marked paid.
+    const done = b.freq === 'once' && b.anchor && paidRec(b, b.anchor);
+    return { b, next, done };
+  }).sort((x, y) => (x.b.active === false || !!x.done) - (y.b.active === false || !!y.done) || (x.next ? x.next.d : '9999').localeCompare(y.next ? y.next.d : '9999'));
   const monthly = sum(S.bills.filter(b => b.active !== false).map(b => {
     const a = billAmt(b).v;
     return b.freq === 'monthly' ? a : b.freq === 'weekly' ? a * 52 / 12 : b.freq === 'biweekly' ? a * 26 / 12 : b.freq === 'yearly' ? a / 12 : 0;
   }));
   let h = `<div class="toolbar"><h1>All bills</h1><button class="btn small" data-act="editBill">+ Add</button></div>
   <p class="small muted" style="margin:0 4px 10px">About <b>${fm(monthly)}</b> a month in total.</p><div class="card">`;
-  h += rows.length ? rows.map(({ b, next }) => {
+  h += rows.length ? rows.map(({ b, next, done }) => {
     const a = billAmt(b);
     return `<button class="row" data-act="editBill" data-id="${b.id}">
-      <span class="dot ${b.active === false ? '' : 'ok'}"></span>
-      <span class="main"><div class="name">${esc(b.name)}${b.varies ? ' <span class="tag">varies</span>' : ''}${b.active === false ? ' <span class="tag">stopped</span>' : ''}</div>
-      <div class="sub">${freqText(b)}${next ? ' · next ' + nice(next.d) : ''}</div></span>
+      <span class="dot ${b.active === false ? '' : done ? 'paid' : 'ok'}"></span>
+      <span class="main"><div class="name">${esc(b.name)}${b.varies ? ' <span class="tag">varies</span>' : ''}${b.active === false ? ' <span class="tag">stopped</span>' : ''}${done ? ' <span class="tag">paid</span>' : ''}</div>
+      <div class="sub">${freqText(b)}${next && b.freq !== 'once' ? ' · next ' + nice(next.d) : ''}${done ? ` · paid ${nice(done.paidOn || done.due)}` : ''}</div></span>
       <span class="amt num">${a.unknown ? '<span class="tag warn">amount?</span>' : (a.est ? '~' : '') + fm(a.v)}</span></button>`;
   }).join('') : `<div class="empty">No bills yet. Tap + Add.</div>`;
   h += `</div>`;
@@ -1146,16 +1152,19 @@ function sheetRecv(inc, d) {
     <div class="btns">${cancelBtn}<button class="btn">Received</button></div>
     <div class="btns"><button type="button" class="btn ghost" data-act="editInc" data-id="${inc.id}">Edit this paycheck</button></div></form>`);
 }
-function freqFields(x, prefix) {
-  const f = x.freq || 'monthly';
+// allowOnce: bills can be "One time only" (paychecks can't).
+function freqFields(x, prefix, allowOnce) {
+  const f = x.freq || 'monthly', once = f === 'once';
   return `<label for="${prefix}Freq">How often</label>
     <select id="${prefix}Freq" name="freq" data-act="freqChange">
       <option value="monthly"${f === 'monthly' ? ' selected' : ''}>Monthly</option>
       <option value="biweekly"${f === 'biweekly' ? ' selected' : ''}>Every 2 weeks</option>
       <option value="weekly"${f === 'weekly' ? ' selected' : ''}>Every week</option>
-      <option value="yearly"${f === 'yearly' ? ' selected' : ''}>Yearly</option></select>
+      <option value="yearly"${f === 'yearly' ? ' selected' : ''}>Yearly</option>
+      ${allowOnce ? `<option value="once"${once ? ' selected' : ''}>One time only</option>` : ''}</select>
     <div data-show="monthly"${f === 'monthly' ? '' : ' hidden'}><label for="${prefix}Day">Day of the month</label><input id="${prefix}Day" name="day" type="number" min="1" max="31" inputmode="numeric" value="${x.day || ''}"></div>
-    <div data-show="other"${f === 'monthly' ? ' hidden' : ''}><label for="${prefix}Anchor">Next date</label><input id="${prefix}Anchor" name="anchor" type="date" value="${x.anchor || ''}"><p class="hint">Any upcoming date it happens on. The rest are worked out from it.</p></div>`;
+    <div data-show="other"${f === 'monthly' ? ' hidden' : ''}><label for="${prefix}Anchor" data-once-text="Due date" data-repeat-text="Next date">${once ? 'Due date' : 'Next date'}</label><input id="${prefix}Anchor" name="anchor" type="date" value="${x.anchor || ''}">
+      <p class="hint" data-once-text="The bill is counted once, on this date. After it's paid, it won't come back." data-repeat-text="Any upcoming date it happens on. The rest are worked out from it.">${once ? "The bill is counted once, on this date. After it's paid, it won't come back." : 'Any upcoming date it happens on. The rest are worked out from it.'}</p></div>`;
 }
 function readFreq(fd) {
   const freq = fd.get('freq');
@@ -1171,7 +1180,7 @@ function sheetBill(b, draft) {
   openSheet(`<form id="fBill" data-id="${b ? b.id : ''}" data-tx="${esc((draft && draft.txId) || '')}" data-due="${esc((draft && draft.anchor) || '')}">
     <h3>${b ? 'Edit bill' : 'New bill'}</h3>
     <label for="bName">Name you see in the app</label><input id="bName" name="name" value="${esc(x.name || '')}" placeholder="For example: Water / sewer / trash" required>
-    ${freqFields(x, 'b')}
+    ${freqFields(x, 'b', true)}
     <label for="bAmt">Usual amount</label><input id="bAmt" name="amount" inputmode="decimal" value="${money2(x.amount)}" placeholder="Leave empty if you don't know yet">
     <label for="bFee">Transaction fee charged with it</label><input id="bFee" name="fee" inputmode="decimal" value="${money2(x.fee)}" placeholder="Optional, for example 2.25">
     <p class="hint">A small extra charge that comes with this bill on the same day. It's added to the bill's total.</p>
@@ -1399,12 +1408,13 @@ function buildIcs() {
     if (b.freq === 'monthly') rule = b.day >= 31 ? 'FREQ=MONTHLY;BYMONTHDAY=-1' : `FREQ=MONTHLY;BYMONTHDAY=${b.day}`;
     else if (b.freq === 'weekly') rule = 'FREQ=WEEKLY';
     else if (b.freq === 'biweekly') rule = 'FREQ=WEEKLY;INTERVAL=2';
+    else if (b.freq === 'once') rule = null;
     else rule = 'FREQ=YEARLY';
     const a = billAmt(b);
     const title = `Bill due: ${b.name}${a.unknown ? '' : ` ${a.est ? '~' : ''}${fm(a.v)}`}`;
     L.push('BEGIN:VEVENT', `UID:${b.id}@billplanner`, `DTSTAMP:${stamp}`,
       `DTSTART;VALUE=DATE:${first.replace(/-/g, '')}`, `DTEND;VALUE=DATE:${addDays(first, 1).replace(/-/g, '')}`,
-      `RRULE:${rule}`, `SUMMARY:${icsEsc(title)}`, 'TRANSP:TRANSPARENT',
+      ...(rule ? [`RRULE:${rule}`] : []), `SUMMARY:${icsEsc(title)}`, 'TRANSP:TRANSPARENT',
       // 9 AM three days before, and 9 AM on the day
       'BEGIN:VALARM', 'ACTION:DISPLAY', `DESCRIPTION:${icsEsc(title + ' in 3 days')}`, 'TRIGGER:-P2DT15H', 'END:VALARM',
       'BEGIN:VALARM', 'ACTION:DISPLAY', `DESCRIPTION:${icsEsc(title + ' today')}`, 'TRIGGER:PT9H', 'END:VALARM',
@@ -1592,6 +1602,7 @@ document.addEventListener('change', e => {
     const f = el.form; const m = el.value === 'monthly';
     f.querySelector('[data-show=monthly]').hidden = !m;
     f.querySelector('[data-show=other]').hidden = m;
+    f.querySelectorAll('[data-once-text]').forEach(x => { x.textContent = el.value === 'once' ? x.dataset.onceText : x.dataset.repeatText; });
   }
 });
 document.addEventListener('submit', e => {
@@ -1631,6 +1642,7 @@ document.addEventListener('submit', e => {
         } else {
           formError(f, fd.get('freq') === 'monthly'
             ? 'Enter the day of the month this bill is due (1-31). Not sure yet? Untick "Still paying this" to save it for later.'
+            : fd.get('freq') === 'once' ? 'Pick the date this bill is due in "Due date".'
             : 'Pick the date of the next payment in "Next date". Not sure yet? Untick "Still paying this" to save it for later.',
             fd.get('freq') === 'monthly' ? 'day' : 'anchor');
           return;
