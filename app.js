@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's safe to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '1.0.4';
+const APP_VERSION = '1.0.5';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -799,5 +799,12 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) rend
 render();
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => { });
 if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === '127.0.0.1' || location.hostname === 'localhost')) {
-  navigator.serviceWorker.register('sw.js').catch(() => { });
+  // When a new version of the app takes over, reload once so it shows straight away.
+  const hadController = !!navigator.serviceWorker.controller;
+  let reloading = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController || reloading || !$('#sheet').hidden) return; // never interrupt an open form
+    reloading = true; location.reload();
+  });
+  navigator.serviceWorker.register('sw.js').then(reg => reg.update()).catch(() => { });
 }
