@@ -155,7 +155,11 @@ function meterHtml() {
     ${who.length ? `<div class="small" style="margin-top:8px">${who.map(([w, v]) => w === UNKNOWN
       ? `<a href="#" data-act="whoUnknown" class="who-unknown"><b>${UNKNOWN}</b> ${fm(v)} (tap to sort)</a>`
       : `<a href="#" data-act="spDetail" data-cat="allfun" data-who="${esc(w)}" class="who-link"><b>${esc(sameName(w, me()) ? 'Me' : w)}</b> ${fm(v)}</a>`).join(' · ')}</div>` : ''}
-    ${s.unsplit.length ? `<div class="small muted" style="margin-top:6px">${s.unsplit.length} gas-station purchase${s.unsplit.length === 1 ? '' : 's'} (${fm(sum(s.unsplit.map(p => p.amt)))}) not split into fuel and snacks yet. ${vehicles().length ? (profile() ? 'They will be the next time the bank data updates.' : 'Add your name under More › Profile first.') : 'Add your vehicles under More › Spending watch.'}</div>` : ''}
+    ${s.unsplit.length ? (() => {
+      const noWho = s.unsplit.filter(p => !p.who), other = s.unsplit.length - noWho.length;
+      return `${noWho.length ? `<div class="small" style="margin-top:6px"><a href="#" data-act="whoUnknown" class="who-unknown"><b>${noWho.length} gas-station purchase${noWho.length === 1 ? '' : 's'}</b> (${fm(sum(noWho.map(p => p.amt)))}) on a card the app doesn't know yet (tap to say whose)</a>. They'll be split into fuel and snacks once it knows whose vehicle they were for.</div>` : ''}
+      ${other ? `<div class="small muted" style="margin-top:6px">${other} gas-station purchase${other === 1 ? '' : 's'} not split into fuel and snacks yet. ${vehicles().length ? (profile() ? 'They will be the next time the bank data updates.' : 'Add your name under More › Profile first.') : 'Add your vehicles under More › Spending watch.'}</div>` : ''}`;
+    })() : ''}
     <div class="btns" style="margin-top:8px"><button class="btn small ghost" data-act="spDetail" data-cat="allfun">See every purchase</button><button class="btn small ghost" data-act="spLimits">Weekly limits</button></div></div>`;
 }
 
@@ -186,7 +190,10 @@ const gasPrice = () => localPrice() || 3.5; // a sensible stand-in until the fir
 
 /* ---------- the automatic gas-station split ---------- */
 const isRound = x => Math.abs(x - Math.round(x)) < 0.005;
-const vehicleOf = who => (who && vehicles().find(v => sameName(v.driver, who))) || vehicles()[0] || null;
+/* Each person fuels their own vehicle with their own card, so a purchase goes to the vehicle of whoever's card it was.
+   One whose card isn't known yet waits until someone says whose it was: lumping it in with a vehicle would use up
+   that vehicle's fuel and make its owner's next stop look like snacks. (With only one vehicle there's no doubt.) */
+const vehicleOf = who => (who ? vehicles().find(v => sameName(v.driver, who)) : vehicles().length === 1 ? vehicles()[0] : null) || null;
 /* For each vehicle, go through its gas-station purchases in date order, keeping a running "fuel burned since the
    last stop" (its usual miles a day / its miles per gallon x the gas price, at most a full tank).
    - A correction tapped by someone wins.
