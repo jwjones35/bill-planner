@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's available to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '1.4.4';
+const APP_VERSION = '1.5.0';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -374,9 +374,25 @@ function applyBank(j, now) {
    balance kept up to date by hand. */
 const inTransitPays = () => S.payments.filter(p => p.inTransit && !p.txId && diffDays(p.paidOn, today()) <= 14);
 const inTransitSpends = () => S.spending.filter(x => x.inTransit && !x.txId && diffDays(x.date, today()) <= 14);
+/* A balance typed in from the bank's own app (which is up to the minute) is used until the bank connection brings
+   data newer than it. Items entered in the app after it, or ticked as "not in the bank's app yet", still subtract. */
+function manualBal() {
+  const m = S.bank.manual;
+  if (!m || !bankOn()) return null;
+  // Newer bank data replaces it. If the bank doesn't say when its balance was taken, a changed balance means new data.
+  if (S.bank.bal.asOf) return m.at > S.bank.bal.asOf ? m : null;
+  return Math.abs((S.bank.bal.checking || 0) - (m.bankBal || 0)) < 0.005 ? m : null;
+}
+const itemKey = x => (x.billId ? 'b|' + x.billId + '|' + x.due : 's|' + x.id);
 function checkingNow() {
   if (!bankOn() || S.bank.bal.checking == null) return S.balances.checking || 0;
-  return S.bank.bal.checking - sum(inTransitPays().map(p => p.amount)) - sum(inTransitSpends().map(x => x.amount));
+  const items = [...inTransitPays(), ...inTransitSpends()];
+  const m = manualBal();
+  if (m) {
+    const keep = new Set(m.keep || []);
+    return m.amount - sum(items.filter(x => keep.has(itemKey(x)) || (x.at || 0) > m.at).map(x => x.amount));
+  }
+  return S.bank.bal.checking - sum(items.map(x => x.amount));
 }
 const savingsNow = () => (bankOn() && S.bank.bal.savings != null ? S.bank.bal.savings : S.balances.savings || 0);
 
@@ -688,15 +704,17 @@ function viewHome() {
     <div class="big num ${c.safe < 0 ? 'neg' : ''}">${fm(c.safe)}</div>
     <div class="small muted">Checking minus the bills due before payday.${nw ? ' Next week is estimated below.' : ' Bills after payday are not included, so keep some back for next week.'}</div>
     ${bankOn()
-      ? `<div class="small muted" style="margin-top:4px">${bankBusy ? `Updating from ${esc(bankName())}...` : `${bankAgeText()} · <a href="#" data-act="bankRefresh">Check now</a>`}</div>
-         ${!bankBusy && Date.now() - bankAsOf() > 36 * HOUR ? `<div class="small" style="margin-top:4px;color:var(--warn)">The bank data is over a day old. Purchases since then may not be included yet.</div>` : ''}
-         ${S.bank.error ? `<div class="small neg" style="margin-top:4px">${esc(S.bank.error)}</div>` : ''}`
+      ? (manualBal()
+        ? `<div class="small muted" style="margin-top:4px">Using the balance you entered from your bank's app (${whenText(manualBal().at)}) until the bank connection has newer data · <a href="#" data-act="balances">Change</a></div>`
+        : `<div class="small muted" style="margin-top:4px">${bankBusy ? `Updating from ${esc(bankName())}...` : `${bankAgeText()} (updates about once a day) · <a href="#" data-act="balances">Enter today's balance from your bank's app</a>`}</div>
+         ${!bankBusy && Date.now() - bankAsOf() > 36 * HOUR ? `<div class="small" style="margin-top:4px;color:var(--warn)">The bank data is over a day old, so recent purchases may be missing. For an up-to-the-minute number, enter today's balance from your bank's app.</div>` : ''}`)
+        + (S.bank.error ? `<div class="small neg" style="margin-top:4px">${esc(S.bank.error)}</div>` : '')
       : `<div class="small muted" style="margin-top:4px">${stale} · <a href="#" data-act="balances">Update</a></div>`}
     ${c.everyday ? `<div class="small muted" style="margin-top:4px">Usual everyday spending until then: about ${fm(c.everyday)} <span class="tag">not subtracted</span></div>` : ''}
     <details><summary>How this is worked out</summary>
       <div class="breakdown num">
-        ${bankOn() ? `<div><span>Checking at ${esc(bankName())}</span><span>${fm(S.bank.bal.checking)}</span></div>
-        ${inTransitPays().length + inTransitSpends().length ? `<div><span>Paid in the app, not showing at the bank yet</span><span>−${fm(sum(inTransitPays().map(p => p.amount)) + sum(inTransitSpends().map(x => x.amount)))}</span></div>` : ''}`
+        ${bankOn() ? `<div><span>${manualBal() ? "Checking (entered from your bank's app)" : `Checking at ${esc(bankName())}`}</span><span>${fm(manualBal() ? manualBal().amount : S.bank.bal.checking)}</span></div>
+        ${Math.abs(checkingNow() - (manualBal() ? manualBal().amount : S.bank.bal.checking)) > 0.004 ? `<div><span>Paid in the app, not showing at the bank yet</span><span>−${fm((manualBal() ? manualBal().amount : S.bank.bal.checking) - checkingNow())}</span></div>` : ''}`
         : `<div><span>Checking${bal.pending ? ' (after pending payments)' : ''}</span><span>${fm(bal.checking)}</span></div>`}
         <div><span>Bills due before payday (${c.bills.length})</span><span>−${fm(c.billsTotal)}</span></div>
         ${c.aside ? `<div><span>Set aside</span><span>−${fm(c.aside)}</span></div>` : ''}
@@ -885,7 +903,7 @@ function viewMore() {
         <p class="hint">Uses SimpleFIN Bridge (a paid service, about $15 a year). You sign in to your bank on SimpleFIN's website, never in this app.</p></div>`}</div>
 
   <h2>Balances</h2><div class="card">
-    <button class="row" data-act="balances"><span class="main"><div class="name">Checking</div><div class="sub">${bankOn() ? bankAgeText() : bal.updated ? 'Updated ' + nice(bal.updated) : 'Not entered yet'}</div></span><span class="amt num">${fm(checkingNow())}</span></button>
+    <button class="row" data-act="balances"><span class="main"><div class="name">Checking</div><div class="sub">${bankOn() ? (manualBal() ? `Entered from your bank's app ${whenText(manualBal().at)}` : bankAgeText()) + ' · tap to enter today\'s balance' : bal.updated ? 'Updated ' + nice(bal.updated) : 'Not entered yet'}</div></span><span class="amt num">${fm(checkingNow())}</span></button>
     <button class="row" data-act="balances"><span class="main"><div class="name">Savings</div></span><span class="amt num">${fm(savingsNow())}</span></button></div>
 
   <h2>Set aside</h2><div class="card">${S.setAsides.map(a => `<button class="row" data-act="editAside" data-id="${a.id}"><span class="main"><div class="name">${esc(a.name)}</div><div class="sub">Not counted as spendable</div></span><span class="amt num">${fm(a.amount)}</span></button>`).join('') || '<div class="empty">Money you are holding for something specific, like a repair.</div>'}
@@ -1085,7 +1103,14 @@ function pendingItems() {
 // With a bank connected, balances come from the bank; this just explains them.
 function sheetBankBalances() {
   const pays = inTransitPays(), spends = inTransitSpends();
-  openSheet(`<h3>Balances</h3><p class="hint">These come from ${esc(bankName())} automatically: ${bankAgeText()}. SimpleFIN gets new data from the bank about once a day, and purchases can take a few days to appear, so anything big you spend today is worth adding with "Record spending".</p>
+  const m = manualBal();
+  const items = [...pays.map(p => ({ key: itemKey(p), name: (findB(p.billId) || {}).name || 'Bill', amount: p.amount, date: p.paidOn, tick: diffDays(p.paidOn, today()) <= 5 })),
+                 ...spends.map(x => ({ key: itemKey(x), name: x.what + (x.note ? ' · ' + x.note : ''), amount: x.amount, date: x.date, tick: false }))];
+  openSheet(`<h3>Balances</h3>
+    ${m ? `<div class="banner good" style="margin-top:6px">Using the balance you entered from your bank's app: <b>${fm(m.amount)}</b> (${whenText(m.at)}). It will be replaced automatically as soon as newer data comes in through your bank connection.
+      <div class="btns" style="margin-top:8px"><button class="btn small ghost" data-act="manualClear">Go back to the automatic balance now</button></div></div>` : ''}
+    <label style="margin-top:14px">Automatic balance from your bank connection</label>
+    <p class="hint" style="margin-top:0">${bankAgeText()}. Your bank connection (SimpleFIN) gets new information from your bank only about once a day, and new purchases can take a few days to show up.</p>
     <div class="breakdown num" style="font-size:15px">
       ${S.bank.bal.posted != null ? `<div class="muted"><span>Posted balance</span><span>${fm(S.bank.bal.posted)}</span></div>` : ''}
       <div class="muted"><span>Pending transactions</span><span>${S.bank.bal.pendingSum < 0 ? '−' : ''}${fm(Math.abs(S.bank.bal.pendingSum || 0))}</span></div>
@@ -1094,9 +1119,18 @@ function sheetBankBalances() {
       ${spends.map(x => `<div><span>${esc(x.what)}, ${nice(x.date)}, not at the bank yet</span><span>−${fm(x.amount)}</span></div>`).join('')}
       <div class="sum"><span>Checking used by the app</span><span>${fm(checkingNow())}</span></div>
       <div class="muted"><span>Savings</span><span>${fm(savingsNow())}</span></div></div>
-    <p class="hint">Pending transactions count as real ones. "Available" should match the available balance in your bank's own app.</p>
-    <p class="hint">Payments you mark paid in the app are subtracted until they show up at the bank (usually 3-5 business days), then they are matched automatically.</p>
-    <div class="btns"><button class="btn ghost" data-act="close">Done</button><button class="btn" data-act="bankRefresh">Update now</button></div>`);
+    <p class="hint">Pending transactions count as real ones. Payments you mark paid in the app are subtracted until they show up through the bank connection (usually 3-5 business days), then they are matched automatically.</p>
+
+    <form id="fManual" style="border-top:1px solid var(--line);margin-top:14px;padding-top:4px">
+      <label for="mBal" style="color:var(--text);font-weight:600;font-size:16px">Enter today's balance from your bank's app</label>
+      <p class="hint" style="margin-top:2px">Your bank's own app is up to the minute; the bank connection is not. If money has been spent or deposited since the connection last updated, open your bank's app and type the <b>available balance</b> it shows. This brings every number in Bill Planner up to date right now. The app goes back to the automatic balance by itself as soon as newer data comes in through the bank connection.</p>
+      <input id="mBal" name="amount" inputmode="decimal" placeholder="Available balance from your bank's app">
+      ${items.length ? `<label>Entered in Bill Planner but not showing in your bank's app yet?</label>
+        <p class="hint" style="margin-top:0">Ticked ones are subtracted from the balance you type. Untick any your bank's app already shows.</p>
+        ${items.map(i => `<label class="check"><input type="checkbox" name="keep" value="${esc(i.key)}"${i.tick ? ' checked' : ''}> ${esc(i.name)} · ${fm(i.amount)} <span class="muted small">${nice(i.date)}</span></label>`).join('')}` : ''}
+      <div class="btns"><button type="button" class="btn ghost" data-act="close">Close</button><button class="btn">Use this balance</button></div>
+    </form>
+    <div class="btns"><button class="btn small ghost" data-act="bankRefresh">Check the bank connection for new data</button></div>`);
 }
 function sheetConnect() {
   openSheet(`<form id="fConnect"><h3>Connect your bank</h3>
@@ -1288,6 +1322,7 @@ document.addEventListener('click', e => {
       save(); render(); toast(`Combined: ${big.name} now includes a ${fm(big.fee)} transaction fee.`); break;
     }
     case 'pairNo': S.ignorePairs = [...new Set([...(S.ignorePairs || []), el.dataset.key])]; save(); render(); break;
+    case 'manualClear': S.bank.manual = null; save(); closeSheet(); render(); toast('Back to the automatic balance from the bank connection.'); break;
     case 'feeSeen': {
       const a = (S.bank.feeAlerts || []).find(x => x.billId === el.dataset.bill && x.date === el.dataset.date);
       if (a) a.seen = true;
@@ -1349,7 +1384,7 @@ document.addEventListener('submit', e => {
       if (amount == null) { toast('Enter the amount paid.'); return; }
       if (bankOn()) {
         // The bank balance doesn't show it yet; subtract it until the matching bank transaction appears.
-        S.payments.push({ billId: b.id, due: f.dataset.d, paidOn: fd.get('paidOn') || today(), amount, fee: b.fee && amount > b.fee ? b.fee : 0, adjusted: false, inTransit: true });
+        S.payments.push({ billId: b.id, due: f.dataset.d, paidOn: fd.get('paidOn') || today(), amount, fee: b.fee && amount > b.fee ? b.fee : 0, adjusted: false, inTransit: true, at: Date.now() });
         runMatching();
       } else {
         const adjusted = fd.get('adjust') === 'on';
@@ -1445,6 +1480,14 @@ document.addEventListener('submit', e => {
         toast(`Connected to ${bankName()}.`);
         if (S.bank.accounts.length > 1) sheetAccounts();
       }).catch(e => { btn.disabled = false; btn.textContent = 'Connect'; toast(e.message); });
+      return;
+    }
+    case 'fManual': {
+      const amount = num(fd.get('amount'));
+      if (amount == null) { toast("Type the available balance from your bank's app."); return; }
+      S.bank.manual = { amount, at: Date.now(), keep: fd.getAll('keep'), bankBal: S.bank.bal ? S.bank.bal.checking : null };
+      save(); closeSheet(); render();
+      toast("Using the balance from your bank's app until the bank connection has newer data.");
       return;
     }
     case 'fTx': {
