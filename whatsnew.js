@@ -4,6 +4,13 @@
    Every release adds an entry here, in plain words: added, changed, fixed, removed. */
 const CHANGELOG = [
   {
+    v: '1.9.3', date: '2026-10-31',
+    changed: ['A comic-book look everywhere: bold ink outlines, solid drop shadows, shading with a hard edge, and halftone dots in the shadows.',
+      'Buttons press down into their shadow when tapped.',
+      'The big money number has an inked drop shadow.'],
+    removed: ['The green edge that was only on the "Available to spend" panel. Every panel is drawn the same way now.']
+  },
+  {
     v: '1.9.2', date: '2026-10-31',
     added: ['This "What\'s new" pop-up. It shows once after each update, and the full list is under More › What\'s new.']
   },
