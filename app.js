@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's available to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.3.0';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -53,7 +53,8 @@ function blankState() {
     version: 1, setupDate: today(),
     balances: { checking: 0, savings: 0, updated: null },
     everydayPerWeek: 0, savingsBuffer: 300, suggestSavings: true,
-    incomes: [], bills: [], payments: [], receipts: [], setAsides: [], infos: [], spending: []
+    incomes: [], bills: [], payments: [], receipts: [], setAsides: [], infos: [], spending: [],
+    bank: { accounts: [], tx: [], ignore: [], suggest: [], autoLog: [] }
   };
 }
 function normalize(s) {
@@ -62,6 +63,7 @@ function normalize(s) {
   out.balances = Object.assign(blankState().balances, out.balances || {});
   for (const k of ['incomes', 'bills', 'payments', 'receipts', 'setAsides', 'infos', 'spending']) if (!Array.isArray(out[k])) out[k] = [];
   for (const k of ['incomes', 'bills', 'setAsides', 'infos', 'spending']) out[k].forEach(x => { if (!x.id) x.id = uid(); });
+  out.bank = Object.assign({ accounts: [], tx: [], ignore: [], suggest: [], autoLog: [] }, out.bank || {});
   return out;
 }
 function load() {
@@ -171,7 +173,7 @@ function calc() {
   const days = Math.max(0, diffDays(t, np));
   const everyday = (S.everydayPerWeek || 0) * days / 7;
   const aside = sum(S.setAsides.map(a => a.amount || 0));
-  const safe = (S.balances.checking || 0) - billsTotal - aside;
+  const safe = checkingNow() - billsTotal - aside;
   return { np, hasPay: !!nextPayday(), bills, billsTotal, days, everyday, aside, safe, unknown: bills.filter(x => x.unknown) };
 }
 /* Estimated available to spend next week = today's available + next payday's expected pay - bills due before the
@@ -227,6 +229,226 @@ function periods(n = 8, countTodaysPay = true) {
   return { c, out, todayPays };
 }
 
+/* ---------- bank connection (SimpleFIN Bridge) ----------
+   The bank login happens on SimpleFIN's own website. The app only keeps SimpleFIN's "access URL", a read-only key,
+   in its own storage slot on this device. It is never put in backup files or sent anywhere except SimpleFIN. */
+const BANK_KEY = 'billplanner.bank';
+const HOUR = 3600000;
+let bankBusy = false;
+function bankAccess() { try { return localStorage.getItem(BANK_KEY) || ''; } catch (e) { return ''; } }
+function setBankAccess(v) { try { if (v) localStorage.setItem(BANK_KEY, v); else localStorage.removeItem(BANK_KEY); } catch (e) { } }
+const bankOn = () => !!(S && bankAccess() && S.bank.checkingId && S.bank.bal);
+const bankName = () => { const a = S.bank.accounts.find(x => x.id === S.bank.checkingId); return (a && a.org) || 'your bank'; };
+function timeAgo(ms) {
+  const m = Math.round((Date.now() - ms) / 60000);
+  if (m < 1) return 'just now';
+  if (m < 60) return `${m} min ago`;
+  const h = Math.round(m / 60);
+  return h < 24 ? `${h} hour${h === 1 ? '' : 's'} ago` : `${Math.round(h / 24)} day${Math.round(h / 24) === 1 ? '' : 's'} ago`;
+}
+const normText = s => String(s || '').toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim();
+const STOP = new Set(['OF', 'THE', 'AND', 'FOR', 'FEE', 'BILL', 'PAYMENT', 'PAYMENTS', 'ORIGINAL', 'VEHICLE', 'REPAIR', 'FORMERLY',
+  'WATER', 'SEWER', 'TRASH', 'HEALTH', 'INSURANCE', 'CAR', 'ELECTRIC', 'ONLINE', 'PAY', 'INC', 'LLC', 'LL', 'CO', 'MY', 'ME']);
+const nameWords = name => normText(name).split(' ').filter(w => w.length >= 2 && !STOP.has(w) && !/^\d+$/.test(w));
+const hasWord = (desc, w) => (' ' + desc + ' ').includes(' ' + w + ' ');
+// Bank wording that says nothing about who was paid
+const BANKWORDS = new Set(['ONLINE', 'PMT', 'PYMT', 'PYMNT', 'PYMNTS', 'PAYMENT', 'PAYMENTS', 'PAY', 'ACH', 'DEBIT', 'CREDIT', 'POS', 'PURCHASE', 'PUR',
+  'DDA', 'PIN', 'RECUR', 'RECURRING', 'CARD', 'CHECKCARD', 'CD', 'WEB', 'TRANSFER', 'XFER', 'BILLPAY', 'BILL', 'AUTOPAY', 'AUTO', 'ELECTRONIC',
+  'WITHDRAWAL', 'W', 'D', 'DIR', 'DEP', 'DEPOSIT', 'PPD', 'ID', 'CO', 'INC', 'LLC', 'THE', 'OF', 'AND', 'REF', 'EDI', 'WEBPAY', 'MOBILE', 'VISA', 'MC']);
+// A remembered match is a set of words that must all appear in the bank description, in any order.
+const learned = (item, desc) => (item.match || []).some(p => p && p.split(' ').every(w => hasWord(desc, w)));
+const guessed = (item, desc) => nameWords(item.name).some(w => hasWord(desc, w));
+// What to remember after the user confirms a match: the first two meaningful words ("VERIZON WIRELESS", "RENT").
+function phraseOf(desc) {
+  const words = desc.split(' ').filter(w => w.length >= 2 && !/^\d+$/.test(w) && !BANKWORDS.has(w));
+  return (words.length ? words : desc.split(' ')).slice(0, 2).join(' ');
+}
+function localDate(sec) { const d = new Date(sec * 1000); return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); }
+
+// Turn a one-time SimpleFIN setup token into the access URL.
+async function claimToken(token) {
+  let url;
+  try { url = atob(token.replace(/\s+/g, '')); } catch (e) { throw new Error("That doesn't look like a SimpleFIN setup token."); }
+  if (!/^https:\/\//.test(url)) throw new Error("That doesn't look like a SimpleFIN setup token.");
+  let r;
+  try { r = await fetch(url, { method: 'POST' }); }
+  catch (e) { throw new Error("Couldn't reach SimpleFIN from this phone. Check the internet connection and try again."); }
+  if (r.status === 403) throw new Error('That setup token was already used or has expired. Create a new one on SimpleFIN.');
+  if (!r.ok) throw new Error('SimpleFIN answered with error ' + r.status + '.');
+  const access = (await r.text()).trim();
+  if (!/^https:\/\/[^:@\/]+:[^@\/]+@/.test(access)) throw new Error("SimpleFIN's answer wasn't what was expected.");
+  return access;
+}
+
+// Fetch balances and the last ~5 weeks of transactions. At most about once an hour (SimpleFIN allows ~24 a day).
+async function fetchBank(force) {
+  const acc = bankAccess();
+  if (!acc || !S || bankBusy) return;
+  const now = Date.now();
+  let log = S.bank.fetchLog || {};
+  if (log.day !== today()) log = { day: today(), count: 0 };
+  if (!force && S.bank.fetchedAt && now - S.bank.fetchedAt < HOUR) return;
+  if (force && S.bank.fetchedAt && now - S.bank.fetchedAt < 2 * 60000) { toast('Updated a moment ago already.'); return; }
+  if (log.count >= 20) { S.bank.error = "Today's update limit is reached. It will update again tomorrow."; save(); render(); return; }
+  bankBusy = true; render();
+  try {
+    const u = new URL(acc);
+    const auth = 'Basic ' + btoa(decodeURIComponent(u.username) + ':' + decodeURIComponent(u.password));
+    const base = u.origin + u.pathname.replace(/\/$/, '');
+    const start = Math.floor((now - 35 * DAY) / 1000);
+    log.count++; S.bank.fetchLog = log;
+    let r;
+    try { r = await fetch(`${base}/accounts?version=2&pending=1&start-date=${start}`, { headers: { Authorization: auth } }); }
+    catch (e) { throw new Error("Couldn't reach SimpleFIN. Check the internet connection."); }
+    if (r.status === 403) throw new Error('SimpleFIN refused the connection. It may have been turned off; reconnect under More.');
+    if (r.status === 402) throw new Error('SimpleFIN says the subscription needs payment.');
+    if (!r.ok) throw new Error('SimpleFIN answered with error ' + r.status + '.');
+    const j = await r.json();
+    applyBank(j, now);
+    const errs = (j.errlist || j.errors || []).map(e => typeof e === 'string' ? e : (e.msg || e.message || e.code || '')).filter(Boolean);
+    S.bank.error = errs.length ? errs.join(' ') : null;
+    S.bank.fetchedAt = now;
+  } catch (e) {
+    S.bank.error = e.message || "Couldn't update from the bank.";
+  }
+  bankBusy = false;
+  save(); render();
+}
+
+function applyBank(j, now) {
+  const raw = Array.isArray(j.accounts) ? j.accounts : [];
+  S.bank.accounts = raw.map(a => ({
+    id: String(a.id), name: a.name || 'Account',
+    org: (a.org && (a.org.name || a.org.domain)) || '',
+    balance: parseFloat(a.balance), available: a['available-balance'] != null && a['available-balance'] !== '' ? parseFloat(a['available-balance']) : null
+  }));
+  const accts = S.bank.accounts;
+  if (!accts.find(a => a.id === S.bank.checkingId)) {
+    const ch = accts.find(a => /check/i.test(a.name)) || accts[0];
+    S.bank.checkingId = ch ? ch.id : null;
+  }
+  if (S.bank.savingsId === undefined || (S.bank.savingsId && !accts.find(a => a.id === S.bank.savingsId))) {
+    const sv = accts.find(a => /sav/i.test(a.name) && a.id !== S.bank.checkingId);
+    S.bank.savingsId = sv ? sv.id : null;
+  }
+  const pick = id => { const a = accts.find(x => x.id === id); return a ? (a.available != null && !isNaN(a.available) ? a.available : a.balance) : null; };
+  S.bank.bal = { checking: pick(S.bank.checkingId), savings: S.bank.savingsId ? pick(S.bank.savingsId) : null, at: now };
+  const ch = raw.find(a => String(a.id) === S.bank.checkingId);
+  S.bank.tx = ((ch && ch.transactions) || []).map(t => ({
+    id: String(t.id),
+    date: t.posted ? localDate(t.posted) : t.transacted_at ? localDate(t.transacted_at) : today(),
+    amount: parseFloat(t.amount),
+    desc: normText(t.description || t.payee || t.memo),
+    pending: !!t.pending
+  })).filter(t => !isNaN(t.amount)).sort((a, b) => b.date.localeCompare(a.date));
+  runMatching();
+}
+
+/* Checking as it really stands: the bank's balance, minus things entered in the app that the bank doesn't show yet
+   (bill payments can take 3-5 business days; card purchases a day or two). Without a bank connection it's the
+   balance kept up to date by hand. */
+const inTransitPays = () => S.payments.filter(p => p.inTransit && !p.txId && diffDays(p.paidOn, today()) <= 14);
+const inTransitSpends = () => S.spending.filter(x => x.inTransit && !x.txId && diffDays(x.date, today()) <= 14);
+function checkingNow() {
+  if (!bankOn() || S.bank.bal.checking == null) return S.balances.checking || 0;
+  return S.bank.bal.checking - sum(inTransitPays().map(p => p.amount)) - sum(inTransitSpends().map(x => x.amount));
+}
+const savingsNow = () => (bankOn() && S.bank.bal.savings != null ? S.bank.bal.savings : S.balances.savings || 0);
+
+// Match bank transactions to bills and paychecks. Confirmed matches happen automatically; first-time ones are
+// offered for the user to confirm on Home.
+function runMatching() {
+  const used = new Set([...S.payments.map(p => p.txId), ...S.receipts.map(r => r.txId), ...S.spending.map(x => x.txId)].filter(Boolean));
+  const ignore = new Set(S.bank.ignore || []);
+  const free = t => !used.has(t.id) && !ignore.has(t.id);
+  const suggest = [];
+  const auto = [];
+  // 1. Link things entered in the app to the bank transaction once it shows up.
+  for (const p of S.payments.filter(p => p.inTransit && !p.txId)) {
+    const t = S.bank.tx.find(t => free(t) && t.amount < 0 && Math.abs(-t.amount - p.amount) < 0.01 && t.date >= addDays(p.paidOn, -3) && t.date <= addDays(p.paidOn, 10));
+    if (t) { p.txId = t.id; used.add(t.id); }
+  }
+  for (const x of S.spending.filter(x => x.inTransit && !x.txId)) {
+    const t = S.bank.tx.find(t => free(t) && t.amount < 0 && Math.abs(-t.amount - x.amount) < 0.01 && t.date >= addDays(x.date, -1) && t.date <= addDays(x.date, 7));
+    if (t) { x.txId = t.id; used.add(t.id); }
+  }
+  // 2. Money out: bill payments.
+  for (const t of S.bank.tx.filter(t => t.amount < 0 && free(t) && t.date >= addDays(S.setupDate, -3))) {
+    const amt = -t.amount;
+    let best = null;
+    for (const b of S.bills) {
+      const from = addDays(t.date, -7) > S.setupDate ? addDays(t.date, -7) : S.setupDate;
+      for (const d of occ(b, from, addDays(t.date, 6))) {
+        if (paidRec(b, d)) continue;
+        const e = billAmt(b);
+        const diff = e.unknown ? null : Math.abs(amt - e.v);
+        const amtOk = e.unknown ? false : b.varies ? diff <= Math.max(5, e.v * 0.6) : diff <= 0.5;
+        let c = null;
+        if (learned(b, t.desc) && (amtOk || b.varies || e.unknown)) c = { auto: true };
+        else if ((guessed(b, t.desc) && (amtOk || e.unknown)) || (!b.varies && !e.unknown && diff < 0.01)) c = { auto: false };
+        if (!c) continue;
+        c = Object.assign(c, { b, d, diff: diff == null ? 999 : diff, gap: Math.abs(diffDays(d, t.date)) });
+        if (!best || (c.auto && !best.auto) || (c.auto === best.auto && (c.diff < best.diff || (c.diff === best.diff && c.gap < best.gap)))) best = c;
+      }
+    }
+    if (!best) continue;
+    if (best.auto) {
+      S.payments.push({ billId: best.b.id, due: best.d, paidOn: t.date, amount: amt, txId: t.id, auto: true });
+      used.add(t.id); auto.push(best.b.name);
+    } else suggest.push({ kind: 'bill', txId: t.id, id: best.b.id, d: best.d });
+  }
+  // 3. Money in: paychecks.
+  for (const t of S.bank.tx.filter(t => t.amount > 0 && free(t) && t.date >= addDays(S.setupDate, -3))) {
+    let best = null;
+    for (const inc of S.incomes) {
+      const from = addDays(t.date, -4) > S.setupDate ? addDays(t.date, -4) : S.setupDate;
+      for (const d of occ(inc, from, addDays(t.date, 5))) {
+        if (rcptRec(inc, d)) continue;
+        const e = incAmt(inc).v;
+        const amtOk = Math.abs(t.amount - e) <= Math.max(50, e * (inc.varies ? 0.7 : 0.25));
+        let c = null;
+        if (learned(inc, t.desc)) c = { auto: true };
+        else if (guessed(inc, t.desc) && amtOk) c = { auto: false };
+        if (!c) continue;
+        c = Object.assign(c, { inc, d, gap: Math.abs(diffDays(d, t.date)) });
+        if (!best || (c.auto && !best.auto) || (c.auto === best.auto && c.gap < best.gap)) best = c;
+      }
+    }
+    if (!best) continue;
+    if (best.auto) {
+      S.receipts.push({ incomeId: best.inc.id, date: best.d, amount: t.amount, txId: t.id, auto: true });
+      used.add(t.id); auto.push(best.inc.name);
+    } else suggest.push({ kind: 'pay', txId: t.id, id: best.inc.id, d: best.d });
+  }
+  S.bank.suggest = suggest;
+  if (auto.length) S.bank.autoLog = [{ at: Date.now(), names: auto }].concat(S.bank.autoLog || []).slice(0, 10);
+}
+
+// The user's answer to "is this the X bill?"
+function answerSuggestion(i, yes) {
+  const s = S.bank.suggest[i];
+  if (!s) return;
+  const t = S.bank.tx.find(x => x.id === s.txId);
+  if (yes && t) {
+    if (s.kind === 'bill') {
+      const b = findB(s.id);
+      S.payments.push({ billId: b.id, due: s.d, paidOn: t.date, amount: -t.amount, txId: t.id, auto: true });
+      b.match = [...new Set([...(b.match || []), phraseOf(t.desc)])];
+      toast(`${b.name} marked paid. Future payments like this will be matched automatically.`);
+    } else {
+      const inc = findI(s.id);
+      S.receipts.push({ incomeId: inc.id, date: s.d, amount: t.amount, txId: t.id, auto: true });
+      inc.match = [...new Set([...(inc.match || []), phraseOf(t.desc)])];
+      toast(`${inc.name} marked received. Future deposits like this will be matched automatically.`);
+    }
+  } else {
+    S.bank.ignore = [...new Set([...(S.bank.ignore || []), s.txId])].slice(-300);
+  }
+  S.bank.suggest.splice(i, 1);
+  runMatching();
+  save(); render();
+}
+
 /* ---------- rendering ---------- */
 let tab = (() => { try { return sessionStorage.getItem('bp.tab') || 'home'; } catch (e) { return 'home'; } })();
 
@@ -267,21 +489,40 @@ function viewHome() {
   const c = calc();
   const nw = nextWeek(c);
   const bal = S.balances;
+  // Bank transactions that look like a bill payment or paycheck: ask once, then match automatically.
+  // Shown right under the main number: until answered, a paid bill is counted as still due.
+  let sugHtml = '';
+  if (bankOn() && S.bank.suggest.length) {
+    sugHtml = `<h2>Found at ${esc(bankName())}: please confirm</h2><div class="card">` + S.bank.suggest.slice(0, 5).map((s, i) => {
+      const t = S.bank.tx.find(x => x.id === s.txId);
+      if (!t) return '';
+      const what = s.kind === 'bill' ? `the <b>${esc((findB(s.id) || {}).name || '')}</b> bill due ${nice(s.d)}` : `the <b>${esc((findI(s.id) || {}).name || '')}</b> paycheck for ${nice(s.d)}`;
+      return `<div class="pad" style="border-top:1px solid var(--line)"><div class="small muted">${nice(t.date)}${t.pending ? ' · pending' : ''}</div>
+        <div><b>${esc(t.desc)}</b> <span class="num">${fm(Math.abs(t.amount))}</span></div>
+        <div class="small" style="margin-top:4px">Is this ${what}?</div>
+        <div class="btns" style="margin-top:8px"><button class="btn small ghost" data-act="sugNo" data-i="${i}">No</button><button class="btn small" data-act="sugYes" data-i="${i}">Yes</button></div></div>`;
+    }).join('') + `<div class="empty">Answering keeps the numbers above right. After the first time, the app recognizes these by itself.</div></div>`;
+  }
   const stale = !bal.updated ? 'Balance not entered yet' : diffDays(bal.updated, t) === 0 ? 'Balance updated today' : `Balance updated ${diffDays(bal.updated, t)} day${diffDays(bal.updated, t) === 1 ? '' : 's'} ago`;
   let h = `<h1>Bills</h1>
   <div class="card hero">
     <div class="label">Available to spend ${c.hasPay ? `until payday, ${nice(c.np)}` : 'for the next 2 weeks'}</div>
     <div class="big num ${c.safe < 0 ? 'neg' : ''}">${fm(c.safe)}</div>
     <div class="small muted">Checking minus the bills due before payday.${nw ? ' Next week is estimated below.' : ' Bills after payday are not included, so keep some back for next week.'}</div>
-    <div class="small muted" style="margin-top:4px">${stale} · <a href="#" data-act="balances">Update</a></div>
+    ${bankOn()
+      ? `<div class="small muted" style="margin-top:4px">${bankBusy ? `Updating from ${esc(bankName())}...` : `Balance from ${esc(bankName())}, updated ${timeAgo(S.bank.bal.at)} · <a href="#" data-act="bankRefresh">Update now</a>`}</div>
+         ${S.bank.error ? `<div class="small neg" style="margin-top:4px">${esc(S.bank.error)}</div>` : ''}`
+      : `<div class="small muted" style="margin-top:4px">${stale} · <a href="#" data-act="balances">Update</a></div>`}
     ${c.everyday ? `<div class="small muted" style="margin-top:4px">Usual everyday spending until then: about ${fm(c.everyday)} <span class="tag">not subtracted</span></div>` : ''}
     <details><summary>How this is worked out</summary>
       <div class="breakdown num">
-        <div><span>Checking${bal.pending ? ' (after pending payments)' : ''}</span><span>${fm(bal.checking)}</span></div>
+        ${bankOn() ? `<div><span>Checking at ${esc(bankName())}</span><span>${fm(S.bank.bal.checking)}</span></div>
+        ${inTransitPays().length + inTransitSpends().length ? `<div><span>Paid in the app, not showing at the bank yet</span><span>−${fm(sum(inTransitPays().map(p => p.amount)) + sum(inTransitSpends().map(x => x.amount)))}</span></div>` : ''}`
+        : `<div><span>Checking${bal.pending ? ' (after pending payments)' : ''}</span><span>${fm(bal.checking)}</span></div>`}
         <div><span>Bills due before payday (${c.bills.length})</span><span>−${fm(c.billsTotal)}</span></div>
         ${c.aside ? `<div><span>Set aside</span><span>−${fm(c.aside)}</span></div>` : ''}
         <div class="sum"><span>Available to spend</span><span>${fm(c.safe)}</span></div>
-        ${bal.savings ? `<div class="muted"><span>Savings (not counted)</span><span>${fm(bal.savings)}</span></div>` : ''}
+        ${savingsNow() ? `<div class="muted"><span>Savings (not counted)</span><span>${fm(savingsNow())}</span></div>` : ''}
       </div></details>
     ${nw ? `<div class="nextweek">
       <div class="nw-label">Estimated available to spend next week, ${nice(nw.p1)} to ${nice(addDays(nw.p2, -1))}</div>
@@ -290,6 +531,7 @@ function viewHome() {
       ${nw.short > 0 ? `<div class="nw-warn">Next week's pay is ${fm(nw.short)} less than next week's bills, so keep at least <b>${fm(nw.short)}</b> of today's money for them.</div>` : ''}
     </div>` : ''}
   </div>
+  ${sugHtml}
   <div class="btns" style="margin-top:10px"><button class="btn" data-act="spend">+ Record spending (groceries, gas, other purchases)</button></div>`;
 
   // Paychecks that should have arrived but weren't confirmed
@@ -298,7 +540,7 @@ function viewHome() {
   const todayPay = payList(t, addDays(t, 1));
   if (todayPay.length) h += `<div class="banner good">Payday today: ${todayPay.map(p => esc(p.inc.name)).join(', ')}. <a href="#" data-act="tab" data-tab="pay">Confirm the amounts</a> when they land.</div>`;
   if (c.unknown.length) h += `<div class="banner warn">${c.unknown.map(x => `<b>${esc(x.b.name)}</b>`).join(', ')} ${c.unknown.length === 1 ? 'has' : 'have'} no amount yet, so ${c.unknown.length === 1 ? "it isn't" : "they aren't"} counted. Tap the bill to add one.</div>`;
-  if (S.suggestSavings && c.hasPay) {
+  if (S.suggestSavings && c.hasPay && !(bankOn() && S.bank.suggest.length)) {
     // Only suggest saving if the cushion stays above the buffer for the next few paydays too,
     // without counting paychecks that haven't been confirmed yet.
     const lowest = Math.min(c.safe - c.everyday, ...periods(4, false).out.map(p => p.run));
@@ -306,12 +548,22 @@ function viewHome() {
     if (extra >= 25) h += `<div class="banner good">You could move <b>${fm(extra)}</b> to savings and still keep at least a ${fm(S.savingsBuffer)} cushion over the next few paydays.</div>`;
   }
 
-  // Spending recorded since the last payday
+  const lastAuto = (S.bank.autoLog || [])[0];
+  if (bankOn() && lastAuto && Date.now() - lastAuto.at < 6 * HOUR) h += `<div class="banner good">Matched automatically from ${esc(bankName())}: ${lastAuto.names.map(esc).join(', ')}.</div>`;
+
+  // Spending since the last payday: from the bank when connected, plus anything recorded by hand.
   const since = lastPayday();
-  const spent = spendSince(since);
-  if (spent.length) {
-    h += `<details class="card" style="margin-top:22px"><summary class="row"><span class="main"><div class="name">Spending recorded since ${nice(since)}</div><div class="sub">${spent.length} purchase${spent.length === 1 ? '' : 's'} · tap to see or remove</div></span><span class="amt num">${fm(sum(spent.map(x => x.amount)))}</span></summary>
-      ${spent.map(x => `<button class="row" data-act="spendEdit" data-id="${x.id}"><span class="dot ok"></span><span class="main"><div class="name">${esc(x.what)}${x.note ? ` <span class="muted" style="font-weight:400">· ${esc(x.note)}</span>` : ''}</div><div class="sub">${nice(x.date)}</div></span><span class="amt num">${fm(x.amount)}</span></button>`).join('')}</details>`;
+  const billTx = new Set(S.payments.map(p => p.txId).concat(S.bank.suggest.map(s => s.txId)).filter(Boolean));
+  const bankSpend = bankOn() ? S.bank.tx.filter(t => t.amount < 0 && t.date >= since && !billTx.has(t.id)) : [];
+  const linked = new Set(S.spending.map(x => x.txId).filter(Boolean));
+  const handSpend = spendSince(since).filter(x => !x.txId);
+  if (bankSpend.length || handSpend.length) {
+    const total = sum(bankSpend.map(t => -t.amount)) + sum(handSpend.map(x => x.amount));
+    const n = bankSpend.length + handSpend.length;
+    h += `<details class="card" style="margin-top:22px"><summary class="row"><span class="main"><div class="name">Spending since ${nice(since)}</div><div class="sub">${n} purchase${n === 1 ? '' : 's'}${bankOn() ? ` · from ${esc(bankName())}` : ''} · tap to see</div></span><span class="amt num">${fm(total)}</span></summary>
+      ${handSpend.map(x => `<button class="row" data-act="spendEdit" data-id="${x.id}"><span class="dot ok"></span><span class="main"><div class="name">${esc(x.what)}${x.note ? ` <span class="muted" style="font-weight:400">· ${esc(x.note)}</span>` : ''}</div><div class="sub">${nice(x.date)} · ${x.cash ? 'cash, entered by hand' : 'entered by hand' + (bankOn() ? ', not at the bank yet' : '')}</div></span><span class="amt num">${fm(x.amount)}</span></button>`).join('')}
+      ${bankSpend.map(t => `<div class="row" style="cursor:default"><span class="dot ${t.pending ? 'soon' : 'ok'}"></span><span class="main"><div class="name">${esc(t.desc)}</div><div class="sub">${nice(t.date)}${t.pending ? ' · pending' : ''}${linked.has(t.id) ? ' · also entered by hand' : ''}</div></span><span class="amt num">${fm(-t.amount)}</span></div>`).join('')}
+    </details>`;
   }
 
   const overdue = dueList(lookback(), t);
@@ -411,9 +663,19 @@ function viewBills() {
 function viewMore() {
   const bal = S.balances;
   let h = `<h1>More</h1>
+  <h2>Bank connection</h2><div class="card">${bankAccess()
+    ? `<div class="pad"><div><b>${bankOn() ? `Connected to ${esc(bankName())}` : 'Connected, waiting for the first update'}</b></div>
+        <div class="small muted">${bankBusy ? 'Updating now...' : S.bank.fetchedAt ? `Last updated ${timeAgo(S.bank.fetchedAt)}. Updates by itself about once an hour while the app is open.` : 'Not updated yet.'}</div>
+        ${S.bank.error ? `<div class="small neg" style="margin-top:4px">${esc(S.bank.error)}</div>` : ''}
+        <div class="btns"><button class="btn small" data-act="bankRefresh">Update now</button><button class="btn small ghost" data-act="bankAccounts">Choose accounts</button></div>
+        <div class="btns"><button class="btn small danger" data-act="bankDisconnect">Disconnect bank</button></div></div>`
+    : `<div class="pad"><p>Connect your bank so balances, spending and paid bills update by themselves, for everyone using the app.</p>
+        <div class="btns"><button class="btn" data-act="bankConnect">Connect bank</button></div>
+        <p class="hint">Uses SimpleFIN Bridge (a paid service, about $15 a year). You sign in to your bank on SimpleFIN's website, never in this app.</p></div>`}</div>
+
   <h2>Balances</h2><div class="card">
-    <button class="row" data-act="balances"><span class="main"><div class="name">Checking</div><div class="sub">${bal.updated ? 'Updated ' + nice(bal.updated) : 'Not entered yet'}</div></span><span class="amt num">${fm(bal.checking)}</span></button>
-    <button class="row" data-act="balances"><span class="main"><div class="name">Savings</div></span><span class="amt num">${fm(bal.savings)}</span></button></div>
+    <button class="row" data-act="balances"><span class="main"><div class="name">Checking</div><div class="sub">${bankOn() ? `From ${esc(bankName())}, updated ${timeAgo(S.bank.bal.at)}` : bal.updated ? 'Updated ' + nice(bal.updated) : 'Not entered yet'}</div></span><span class="amt num">${fm(checkingNow())}</span></button>
+    <button class="row" data-act="balances"><span class="main"><div class="name">Savings</div></span><span class="amt num">${fm(savingsNow())}</span></button></div>
 
   <h2>Set aside</h2><div class="card">${S.setAsides.map(a => `<button class="row" data-act="editAside" data-id="${a.id}"><span class="main"><div class="name">${esc(a.name)}</div><div class="sub">Not counted as spendable</div></span><span class="amt num">${fm(a.amount)}</span></button>`).join('') || '<div class="empty">Money you are holding for something specific, like a repair.</div>'}
     <div class="list-actions"><button class="btn small ghost" data-act="editAside">+ Set money aside</button></div></div>
@@ -487,8 +749,9 @@ function sheetPay(b, d) {
     <div class="two"><div><label for="pAmt">Amount paid</label><input id="pAmt" name="amount" inputmode="decimal" value="${a.unknown ? '' : money2(a.v)}" placeholder="0.00" required></div>
     <div><label for="pOn">Paid on</label><input id="pOn" name="paidOn" type="date" value="${today()}" required></div></div>
     ${a.est ? `<p class="hint">The amount is an estimate. Change it to what you really paid.</p>` : ''}
-    <label class="check"><input type="checkbox" name="adjust" checked> Subtract it from my checking balance</label>
-    <p class="hint">Untick this if you have already updated your balance since paying.</p>
+    ${bankOn() ? `<p class="hint">It's subtracted from checking until ${esc(bankName())} shows the payment (usually 3-5 business days), then matched automatically.</p>`
+    : `<label class="check"><input type="checkbox" name="adjust" checked> Subtract it from my checking balance</label>
+    <p class="hint">Untick this if you have already updated your balance since paying.</p>`}
     <div class="btns">${cancelBtn}<button class="btn">Mark paid</button></div></form>`);
 }
 function sheetRecv(inc, d) {
@@ -503,8 +766,9 @@ function sheetRecv(inc, d) {
     <h3>${esc(inc.name)}</h3><p class="muted">Payday ${nice(d)}</p>
     <label for="rAmt">Amount that landed in checking</label><input id="rAmt" name="amount" inputmode="decimal" value="${money2(a.v)}" required>
     ${a.est ? `<p class="hint">This one varies. Enter the real amount so future estimates get better.</p>` : ''}
-    <label class="check"><input type="checkbox" name="adjust" checked> Add it to my checking balance</label>
-    <p class="hint">Untick this if you have already updated your balance since it arrived.</p>
+    ${bankOn() ? `<p class="hint">Your balance comes from ${esc(bankName())}, so this only records the amount.</p>`
+    : `<label class="check"><input type="checkbox" name="adjust" checked> Add it to my checking balance</label>
+    <p class="hint">Untick this if you have already updated your balance since it arrived.</p>`}
     <div class="btns">${cancelBtn}<button class="btn">Received</button></div>
     <div class="btns"><button type="button" class="btn ghost" data-act="editInc" data-id="${inc.id}">Edit this paycheck</button></div></form>`);
 }
@@ -602,7 +866,38 @@ function pendingItems() {
     .map(x => ({ key: 's|' + x.id, rec: x, name: x.what + (x.note ? ' · ' + x.note : ''), amount: x.amount, date: x.date, tick: diffDays(x.date, t) <= 2 }));
   return bills.concat(spends).sort((a, b) => b.date.localeCompare(a.date));
 }
+// With a bank connected, balances come from the bank; this just explains them.
+function sheetBankBalances() {
+  const pays = inTransitPays(), spends = inTransitSpends();
+  openSheet(`<h3>Balances</h3><p class="hint">These come from ${esc(bankName())} automatically, updated ${timeAgo(S.bank.bal.at)}.</p>
+    <div class="breakdown num" style="font-size:15px">
+      <div><span>Checking at ${esc(bankName())}</span><span>${fm(S.bank.bal.checking)}</span></div>
+      ${pays.map(p => `<div><span>${esc((findB(p.billId) || {}).name || 'Bill')}, paid ${nice(p.paidOn)}, not at the bank yet</span><span>−${fm(p.amount)}</span></div>`).join('')}
+      ${spends.map(x => `<div><span>${esc(x.what)}, ${nice(x.date)}, not at the bank yet</span><span>−${fm(x.amount)}</span></div>`).join('')}
+      <div class="sum"><span>Checking used by the app</span><span>${fm(checkingNow())}</span></div>
+      <div class="muted"><span>Savings</span><span>${fm(savingsNow())}</span></div></div>
+    <p class="hint">Payments you mark paid in the app are subtracted until they show up at the bank (usually 3-5 business days), then they are matched automatically.</p>
+    <div class="btns"><button class="btn ghost" data-act="close">Done</button><button class="btn" data-act="bankRefresh">Update now</button></div>`);
+}
+function sheetConnect() {
+  openSheet(`<form id="fConnect"><h3>Connect your bank</h3>
+    <ol class="small" style="padding-left:20px;margin:8px 0">
+      <li>On SimpleFIN Bridge (bridge.simplefin.org), sign up and connect your bank. You sign in to your bank there, not here.</li>
+      <li>In SimpleFIN, create a new <b>app connection</b> and copy the <b>setup token</b> it shows.</li>
+      <li>Paste it below. Each phone needs its own setup token.</li></ol>
+    <label for="sfTok">SimpleFIN setup token</label><textarea id="sfTok" name="token" rows="3" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste the setup token here"></textarea>
+    <p class="hint">Only a read-only connection key is kept, on this phone only. It is never put in backup files, and nothing can move money with it.</p>
+    <div class="btns">${cancelBtn}<button class="btn">Connect</button></div></form>`);
+}
+function sheetAccounts() {
+  const opts = sel => S.bank.accounts.map(a => `<option value="${esc(a.id)}"${a.id === sel ? ' selected' : ''}>${esc(a.name)}${a.org ? ' (' + esc(a.org) + ')' : ''} · ${fm(a.available != null && !isNaN(a.available) ? a.available : a.balance)}</option>`).join('');
+  openSheet(`<form id="fAccounts"><h3>Choose accounts</h3>
+    <label for="acCh">Checking account (bills come out of this one)</label><select id="acCh" name="checking">${opts(S.bank.checkingId)}</select>
+    <label for="acSv">Savings account</label><select id="acSv" name="savings"><option value="">None</option>${opts(S.bank.savingsId)}</select>
+    <div class="btns">${cancelBtn}<button class="btn">Save</button></div></form>`);
+}
 function sheetBalances() {
+  if (bankOn()) { sheetBankBalances(); return; }
   const pend = pendingItems();
   openSheet(`<form id="fBal"><h3>Balances</h3><p class="hint">Copy the balances your bank app shows. Bills you mark paid, spending you record and paychecks you confirm keep checking up to date between updates.</p>
     <label for="cBal">Checking, as your bank shows it</label><input id="cBal" name="checking" inputmode="decimal" value="${pend.length ? '' : money2(S.balances.checking)}" placeholder="0.00" required>
@@ -627,8 +922,11 @@ function sheetSpend() {
     <label for="xWhat">What it was for</label><select id="xWhat" name="what">${SPEND_KINDS.map(k => `<option>${k}</option>`).join('')}</select>
     <label for="xNote">Note</label><input id="xNote" name="note" placeholder="Optional, for example the store">
     <label for="xDate">Date</label><input id="xDate" name="date" type="date" value="${today()}" required>
-    <label class="check"><input type="checkbox" name="adjust" checked> Subtract it from my checking balance</label>
-    <p class="hint">Untick this if you have already updated your balance since spending it.</p>
+    <label class="check"><input type="checkbox" name="cash"> Paid with cash (not from checking)</label>
+    ${bankOn()
+      ? `<p class="hint">Card purchases are subtracted until ${esc(bankName())} shows them, then matched automatically. Purchases usually show up at the bank by themselves, so you only need this for ones that haven't yet, or for cash.</p>`
+      : `<label class="check"><input type="checkbox" name="adjust" checked> Subtract it from my checking balance</label>
+    <p class="hint">Untick this if you have already updated your balance since spending it.</p>`}
     <div class="btns">${cancelBtn}<button class="btn">Record</button></div></form>`);
 }
 function sheetSpendEdit(x) {
@@ -746,9 +1044,26 @@ document.addEventListener('click', e => {
     case 'recv': sheetRecv(findI(id), d); break;
     case 'unpay': {
       const b = findB(id); const p = paidRec(b, d);
-      if (p) { if (p.adjusted) S.balances.checking = (S.balances.checking || 0) + p.amount; S.payments = S.payments.filter(x => x !== p); save(); }
+      if (p) {
+        if (p.adjusted) S.balances.checking = (S.balances.checking || 0) + p.amount;
+        // If it was matched from the bank, don't match that bank transaction to this bill again.
+        if (p.txId && p.auto) S.bank.ignore = [...new Set([...(S.bank.ignore || []), p.txId])];
+        S.payments = S.payments.filter(x => x !== p); save();
+      }
       closeSheet(); render(); toast(`${b.name} marked not paid.`); break;
     }
+    case 'bankConnect': sheetConnect(); break;
+    case 'bankAccounts': if (S.bank.accounts.length) sheetAccounts(); else toast('Update from the bank first.'); break;
+    case 'bankRefresh': fetchBank(true); break;
+    case 'bankDisconnect':
+      if (confirm('Disconnect the bank from this phone? Your bills and history stay. To stop it completely, also remove the app connection on SimpleFIN.')) {
+        setBankAccess('');
+        S.bank = { accounts: [], tx: [], ignore: S.bank.ignore || [], suggest: [], autoLog: [] };
+        save(); render(); toast('Bank disconnected. Balances are entered by hand again.');
+      }
+      break;
+    case 'sugYes': answerSuggestion(Number(el.dataset.i), true); break;
+    case 'sugNo': answerSuggestion(Number(el.dataset.i), false); break;
     case 'unrecv': {
       const inc = findI(id); const r = rcptRec(inc, d);
       if (r) { if (r.adjusted) S.balances.checking = (S.balances.checking || 0) - r.amount; S.receipts = S.receipts.filter(x => x !== r); save(); }
@@ -800,16 +1115,22 @@ document.addEventListener('submit', e => {
     case 'fPay': {
       const b = findB(id); const amount = num(fd.get('amount'));
       if (amount == null) { toast('Enter the amount paid.'); return; }
-      const adjusted = fd.get('adjust') === 'on';
-      S.payments.push({ billId: b.id, due: f.dataset.d, paidOn: fd.get('paidOn') || today(), amount, adjusted });
-      if (adjusted) S.balances.checking = (S.balances.checking || 0) - amount;
+      if (bankOn()) {
+        // The bank balance doesn't show it yet; subtract it until the matching bank transaction appears.
+        S.payments.push({ billId: b.id, due: f.dataset.d, paidOn: fd.get('paidOn') || today(), amount, adjusted: false, inTransit: true });
+        runMatching();
+      } else {
+        const adjusted = fd.get('adjust') === 'on';
+        S.payments.push({ billId: b.id, due: f.dataset.d, paidOn: fd.get('paidOn') || today(), amount, adjusted });
+        if (adjusted) S.balances.checking = (S.balances.checking || 0) - amount;
+      }
       if (b.amount == null && !b.varies) b.amount = amount;
       save(); closeSheet(); render(); toast(`${b.name} marked paid.`); break;
     }
     case 'fRecv': {
       const inc = findI(id); const amount = num(fd.get('amount'));
       if (amount == null) { toast('Enter the amount.'); return; }
-      const adjusted = fd.get('adjust') === 'on';
+      const adjusted = !bankOn() && fd.get('adjust') === 'on'; // with a bank connected, the deposit is already in the balance
       S.receipts.push({ incomeId: inc.id, date: f.dataset.d, amount, adjusted });
       if (adjusted) S.balances.checking = (S.balances.checking || 0) + amount;
       save(); closeSheet(); render(); toast(`${inc.name} received.`); break;
@@ -837,9 +1158,12 @@ document.addEventListener('submit', e => {
     case 'fSpend': {
       const amount = num(fd.get('amount'));
       if (!amount || amount <= 0) { toast('Enter the amount spent.'); return; }
-      const adjusted = fd.get('adjust') === 'on';
-      S.spending.push({ id: uid(), date: fd.get('date') || today(), amount, what: fd.get('what'), note: fd.get('note').trim(), adjusted, at: Date.now() });
+      const cash = fd.get('cash') === 'on';
+      const inTransit = !cash && bankOn();
+      const adjusted = !cash && !bankOn() && fd.get('adjust') === 'on';
+      S.spending.push({ id: uid(), date: fd.get('date') || today(), amount, what: fd.get('what'), note: fd.get('note').trim(), adjusted, inTransit, cash, at: Date.now() });
       if (adjusted) S.balances.checking = (S.balances.checking || 0) - amount;
+      if (inTransit) runMatching();
       // Keep the history from growing forever: drop records older than about 4 months
       const cutoff = addDays(today(), -120);
       S.spending = S.spending.filter(x => x.date >= cutoff);
@@ -864,6 +1188,29 @@ document.addEventListener('submit', e => {
       S.balances.updated = today();
       save(); closeSheet(); render(); toast(pendingSum ? `Balances updated, minus ${fm(pendingSum)} still on its way out.` : 'Balances updated.'); break;
     }
+    case 'fConnect': {
+      const token = (fd.get('token') || '').trim();
+      if (!token) { toast('Paste the setup token from SimpleFIN.'); return; }
+      const btn = f.querySelector('button.btn:not(.ghost)'); btn.disabled = true; btn.textContent = 'Connecting...';
+      claimToken(token).then(async access => {
+        setBankAccess(access);
+        S.bank = { accounts: [], tx: [], ignore: S.bank.ignore || [], suggest: [], autoLog: [] };
+        save(); closeSheet();
+        await fetchBank(false);
+        if (S.bank.error && !S.bank.accounts.length) { toast(S.bank.error); return; }
+        toast(`Connected to ${bankName()}.`);
+        if (S.bank.accounts.length > 1) sheetAccounts();
+      }).catch(e => { btn.disabled = false; btn.textContent = 'Connect'; toast(e.message); });
+      return;
+    }
+    case 'fAccounts': {
+      S.bank.checkingId = fd.get('checking');
+      S.bank.savingsId = fd.get('savings') || null;
+      S.bank.fetchedAt = 0; S.bank.tx = []; S.bank.bal = null;
+      save(); closeSheet();
+      fetchBank(false);
+      break;
+    }
     case 'fPlan': {
       S.everydayPerWeek = num(fd.get('everyday')) || 0;
       S.suggestSavings = fd.get('suggest') === 'on';
@@ -882,9 +1229,10 @@ document.addEventListener('focusin', e => {
 });
 
 // Re-draw when the app comes back to the front (the date may have changed).
-document.addEventListener('visibilitychange', () => { if (!document.hidden) render(); });
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { render(); fetchBank(false); } });
 
 render();
+fetchBank(false); // updates from the bank if connected and the last update is over an hour old
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => { });
 if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === '127.0.0.1' || location.hostname === 'localhost')) {
   // When a new version of the app takes over, reload once so it shows straight away.
