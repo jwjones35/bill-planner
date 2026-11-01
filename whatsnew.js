@@ -4,6 +4,10 @@
    Every release adds an entry here, in plain words: added, changed, fixed, removed. */
 const CHANGELOG = [
   {
+    v: '2.2.8', date: '2026-11-01',
+    added: ['A big red warning at the top of Home whenever the bank connection stops working or the bank hasn\'t sent anything new for more than a day. While it\'s showing, "Available to spend" is marked NOT CURRENT, so an old number is never mistaken for today\'s.', 'A "Fix the connection" button on that warning. It walks you through reconnecting on SimpleFIN one step at a time, and checks the connection by itself when you come back to the app.']
+  },
+  {
     v: '2.2.7', date: '2026-11-01',
     changed: ['A new app icon in the comic colors: a calendar page with a teal dollar sign on dark purple. (The icon already on your Home Screen stays the old one. That\'s normal for iPhone, and nothing else changes.)']
   },

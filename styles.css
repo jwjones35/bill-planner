@@ -386,3 +386,12 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
 #sheet { border: 2px solid var(--ink); border-bottom: 0; }
 .sheet-top { border-bottom: 2px solid var(--ink); }
 #toast { border: 2px solid var(--ink); box-shadow: var(--drop-sm); }
+/* Bank connection broken or out of date: impossible to miss */
+.bank-alert { background: var(--bad); color: #fff; border: 3px solid var(--ink); border-radius: 14px; box-shadow: 6px 6px 0 var(--ink); padding: 14px 16px; margin-bottom: 12px; }
+.bank-alert .ba-title { font-size: 20px; font-weight: 800; line-height: 1.25; text-shadow: 2px 2px 0 var(--ink); }
+.bank-alert p { margin: 8px 0 0; }
+.bank-alert .btns { margin-top: 12px; flex-wrap: wrap; }
+.bank-alert .btn { background: #fff !important; color: var(--bad); font-weight: 800; }
+.bank-alert .btn.ghost { background: rgba(255,255,255,.18) !important; color: #fff; }
+.hero.not-current .big { opacity: .45; text-decoration: line-through; text-decoration-thickness: 3px; }
+.nc-tag { display: inline-block; background: var(--bad); color: #fff; font-weight: 800; font-size: 12px; padding: 2px 8px; border-radius: 6px; border: 2px solid var(--ink); margin-left: 6px; vertical-align: middle; }
