@@ -1,6 +1,6 @@
 // Offline support: keeps a copy of the app's own files so it opens without a connection.
 // Bump VERSION whenever any app file changes, so phones pick up the update.
-const VERSION = 'bp-2.2.8';
+const VERSION = 'bp-2.2.9';
 const FILES = ['./', 'index.html', 'styles.css', 'whatsnew.js', 'sync.js', 'spending.js', 'app.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
 
@@ -34,12 +34,19 @@ self.addEventListener('push', e => {
   e.waitUntil((async () => {
     let n = { title: 'Bill Planner', body: 'You have a reminder. Open the app to see it.', tag: 'bp' };
     try { if (e.data) n = await readNote(e.data.text()); } catch (x) { }
-    await self.registration.showNotification(n.title, { body: n.body, tag: n.tag, icon: 'icons/icon-192.png', badge: 'icons/icon-192.png', data: { url: './' } });
+    // url: where tapping it should go inside the app (for example './?fix=1' opens the bank-fix steps).
+    const url = typeof n.url === 'string' && n.url.startsWith('./') ? n.url : './';
+    await self.registration.showNotification(n.title, { body: n.body, tag: n.tag, icon: 'icons/icon-192.png', badge: 'icons/icon-192.png', data: { url } });
   })());
 });
 self.addEventListener('notificationclick', e => {
   e.notification.close();
-  e.waitUntil(clients.matchAll({ type: 'window', includeUncontrolled: true }).then(cs => cs.length ? cs[0].focus() : clients.openWindow('./')));
+  const url = (e.notification.data && e.notification.data.url) || './';
+  e.waitUntil(clients.matchAll({ type: 'window', includeUncontrolled: true }).then(cs => {
+    if (!cs.length) return clients.openWindow(url);
+    if (url !== './') cs[0].postMessage({ open: url }); // the app is already open: tell it where to go
+    return cs[0].focus();
+  }));
 });
 
 // Network first (so updates show up), falling back to the saved copy when offline.

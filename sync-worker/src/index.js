@@ -96,6 +96,58 @@ async function sendDue(env) {
   }
 }
 
+/* ---------- around-the-clock bank check ----------
+   Every 4 hours (every 2 while broken) the storage asks SimpleFIN for balances only, with the household's read-only
+   key. It keeps no balances or transactions, only whether the connection works. When it breaks, every phone gets
+   the "sign in again" notification; when it works again, the "working again" one. Both were encrypted by the phones.
+   SimpleFIN allows about 24 requests a day per key; this uses at most 12, and the phones' own checks are shared. */
+const BW_OK_EVERY = 4 * 3600000, BW_BROKEN_EVERY = 2 * 3600000;
+// Errors that clearly mean someone has to sign in again (anything else must happen twice in a row).
+const BW_SIGNIN = /auth|attention|sign.?in|log.?in|credential|password|mfa|verif|reconnect|expired/i;
+// Only SimpleFIN's own addresses (and, on the developer's PC, a pretend SimpleFIN for testing).
+function bwHostOk(env, u) {
+  try { const x = new URL(u); return (x.protocol === 'https:' && /(^|\.)simplefin\.org$/.test(x.hostname)) || (!!env.BW_TEST_HOST && x.hostname === env.BW_TEST_HOST); } catch (e) { return false; }
+}
+// One check: 'ok', 'broken' (with sure = it clearly needs a sign-in), or null when SimpleFIN couldn't be reached.
+async function bwCheck(env, access) {
+  let r;
+  try {
+    const u = new URL(access);
+    const auth = 'Basic ' + btoa(decodeURIComponent(u.username) + ':' + decodeURIComponent(u.password));
+    r = await fetch(`${u.protocol}//${u.host}${u.pathname.replace(/\/$/, '')}/accounts?version=2&balances-only=1`, { headers: { Authorization: auth } });
+  } catch (e) { return null; }
+  if (r.status === 403 || r.status === 402) return { state: 'broken', sure: true };
+  if (!r.ok) return null;
+  let j; try { j = await r.json(); } catch (e) { return null; }
+  const errs = (j.errlist || j.errors || []).map(e => typeof e === 'string' ? e : (e && (e.msg || e.message || e.code)) || '').filter(Boolean);
+  if (!errs.length) return { state: 'ok' };
+  return { state: 'broken', sure: errs.some(e => BW_SIGNIN.test(e)) };
+}
+async function bwRun(env, onlyId) {
+  const now = Date.now();
+  const rows = onlyId
+    ? [await env.DB.prepare('SELECT * FROM bankwatch WHERE household = ?').bind(onlyId).first()].filter(Boolean)
+    : (await env.DB.prepare('SELECT * FROM bankwatch').all()).results || [];
+  for (const w of rows) {
+    if (!env.BW_TEST_HOST && now - w.checked < (onlyId ? 120000 : (w.state === 'broken' ? BW_BROKEN_EVERY : BW_OK_EVERY) - 60000)) continue;
+    const c = await bwCheck(env, w.access);
+    if (!c) { await env.DB.prepare('UPDATE bankwatch SET checked = ? WHERE household = ?').bind(now, w.household).run(); continue; }
+    let state = w.state, strikes = 0;
+    if (c.state === 'ok') state = 'ok';
+    else { strikes = w.strikes + 1; if (c.sure || strikes >= 2) state = 'broken'; }
+    const changed = state !== w.state;
+    await env.DB.prepare('UPDATE bankwatch SET state = ?, strikes = ?, checked = ?, changed = ? WHERE household = ?')
+      .bind(state, strikes, now, changed ? now : w.changed, w.household).run();
+    // Notify on a real change (not the very first check after being set up, unless it's already broken).
+    const note = changed && state === 'broken' ? w.broken : changed && state === 'ok' && w.state === 'broken' ? w.fixed : null;
+    console.log(`bankwatch: ${w.state} -> ${state}${note ? (note === w.broken ? ' (sent: sign in again)' : ' (sent: working again)') : ''}`);
+    if (note) {
+      const subs = (await env.DB.prepare('SELECT endpoint, p256dh, auth FROM subs WHERE household = ?').bind(w.household).all()).results || [];
+      for (const s of subs) { try { await sendPush(env, s, note); } catch (e) { } }
+    }
+  }
+}
+
 // For the encryption test on the developer's PC (ignored by Cloudflare).
 export const _test = { encryptPush, vapid };
 
@@ -148,7 +200,7 @@ async function fetchPrices(env, force) {
 }
 
 export default {
-  async scheduled(event, env, ctx) { ctx.waitUntil(Promise.all([sendDue(env), fetchPrices(env).catch(() => { })])); },
+  async scheduled(event, env, ctx) { ctx.waitUntil(Promise.all([sendDue(env), fetchPrices(env).catch(() => { }), bwRun(env).catch(() => { })])); },
   async fetch(req, env) {
     if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors(req) });
     const url = new URL(req.url);
@@ -172,7 +224,7 @@ export default {
       }
       return json(req, 405, { error: 'method not allowed' });
     }
-    const m = url.pathname.match(/^\/v1\/h\/([A-Za-z0-9_-]{16,64})(?:\/(sub|sched|test|notify|subs|fuelprice|inbox))?$/);
+    const m = url.pathname.match(/^\/v1\/h\/([A-Za-z0-9_-]{16,64})(?:\/(sub|sched|test|notify|subs|fuelprice|inbox|bankwatch))?$/);
     if (!m) return json(req, 404, { error: 'not found' });
     const id = m[1];
     const token = (req.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
@@ -229,6 +281,25 @@ export default {
         await env.DB.prepare('DELETE FROM inbox WHERE household = ?').bind(id).run();
         return json(req, 200, { data: n.data });
       }
+      /* The around-the-clock bank check. PUT { access, broken, fixed } turns it on (or updates it); GET says how
+         it's going (never the key); DELETE turns it off. POST checks right now (used after reconnecting). */
+      if (m[2] === 'bankwatch') {
+        if (req.method === 'PUT') {
+          const a = String(body.access || '');
+          if (!/^https?:\/\/[^:@\/]+:[^@\/]+@[^\/]+\//.test(a) || a.length > 600 || !bwHostOk(env, a)) return json(req, 400, { error: 'bad access' });
+          if (typeof body.broken !== 'string' || typeof body.fixed !== 'string' || body.broken.length > 1500 || body.fixed.length > 1500) return json(req, 400, { error: 'bad notes' });
+          const old = await env.DB.prepare('SELECT access FROM bankwatch WHERE household = ?').bind(id).first();
+          if (old && old.access === a) await env.DB.prepare('UPDATE bankwatch SET broken = ?, fixed = ?, updated = ? WHERE household = ?').bind(body.broken, body.fixed, Date.now(), id).run();
+          else await env.DB.prepare("INSERT OR REPLACE INTO bankwatch (household, access, broken, fixed, state, strikes, checked, changed, updated) VALUES (?, ?, ?, ?, 'unknown', 0, 0, 0, ?)").bind(id, a, body.broken, body.fixed, Date.now()).run();
+          return json(req, 200, { ok: true });
+        }
+        if (req.method === 'POST') { await bwRun(env, id); }
+        if (req.method === 'GET' || req.method === 'POST') {
+          const w = await env.DB.prepare('SELECT state, checked, changed FROM bankwatch WHERE household = ?').bind(id).first();
+          return json(req, 200, w ? { on: true, state: w.state, checked: w.checked, changed: w.changed } : { on: false });
+        }
+        if (req.method === 'DELETE') { await env.DB.prepare('DELETE FROM bankwatch WHERE household = ?').bind(id).run(); return json(req, 200, { ok: true }); }
+      }
       // Which people have a phone set up for notifications (their codes only).
       if (m[2] === 'subs' && req.method === 'GET') {
         const subs = (await env.DB.prepare('SELECT who FROM subs WHERE household = ?').bind(id).all()).results || [];
@@ -272,6 +343,7 @@ export default {
         await env.DB.prepare('DELETE FROM households WHERE id = ?').bind(id).run();
         await env.DB.prepare('DELETE FROM subs WHERE household = ?').bind(id).run();
         await env.DB.prepare('DELETE FROM sched WHERE household = ?').bind(id).run();
+        await env.DB.prepare('DELETE FROM bankwatch WHERE household = ?').bind(id).run();
       }
       return json(req, 200, { ok: true });
     }

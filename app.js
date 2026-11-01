@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's available to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '2.2.8';
+const APP_VERSION = '2.2.9';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -360,7 +360,8 @@ async function fetchBank(force) {
   if (!force && S.bank.fetchedAt && now - S.bank.fetchedAt < HOUR) return;
   if (force === true && S.bank.fetchedAt && now - S.bank.fetchedAt < 2 * 60000) { toast('Updated a moment ago already.'); return; }
   if (force === 'fix' && S.bank.fetchedAt && now - S.bank.fetchedAt < 60000) return;
-  if (log.count >= 20) { S.bank.error = "Today's update limit is reached. It will update again tomorrow."; save(); render(); return; }
+  // (SimpleFIN allows about 24 a day; the sync storage's around-the-clock check uses some of them.)
+  if (log.count >= 16) { S.bank.error = "Today's update limit is reached. It will update again tomorrow."; save(); render(); return; }
   bankBusy = true; render();
   try {
     const u = new URL(acc);
@@ -394,6 +395,9 @@ function bankProblem() {
   if (!S || !bankOn()) return null;
   const m = manualBal(), freshHand = !!(m && Date.now() - m.at < 12 * HOUR);
   if (S.bank.error) return { kind: 'error', msg: S.bank.error, freshHand };
+  // The around-the-clock check on the sync storage found it broken before this phone did.
+  // (Unless this phone has heard from the bank without a problem since then.)
+  if (bankWatchInfo && bankWatchInfo.state === 'broken' && !((S.bank.fetchedAt || 0) > (bankWatchInfo.changed || 0))) return { kind: 'error', msg: 'The connection needs a new sign-in.', freshHand };
   const asOf = bankAsOf();
   if (asOf && Date.now() - asOf > 36 * HOUR && !freshHand) return { kind: 'old', asOf, freshHand };
   return null;
@@ -429,7 +433,10 @@ async function bankFixCheck(manual) {
   if (!S || !S.bank.fixAt) return;
   if (!manual && Date.now() - S.bank.fixAt > 6 * HOUR) { S.bank.fixAt = null; save(); return; }
   await fetchBank('fix');
-  if (!S.bank.error) { S.bank.fixAt = null; save(); render(); closeSheet(); toast(`Your connection to ${bankName()} is working again.`); return; }
+  if (!S.bank.error) {
+    // Tell the around-the-clock check too, so it stops reporting the problem (and the other phone hears it's fixed).
+    try { await bankWatchPoke(); } catch (e) { }
+    S.bank.fixAt = null; save(); render(); closeSheet(); toast(`Your connection to ${bankName()} is working again.`); return; }
   if (manual) {
     const bank = esc(bankName());
     openSheet(`<h3>Not working yet</h3><p class="small muted" style="margin-top:0">Step 2 of 2</p>
@@ -1267,6 +1274,7 @@ function viewMore() {
   <h2>Bank connection</h2><div class="card">${bankAccess()
     ? `<div class="pad"><div><b>${bankOn() ? `Connected to ${esc(bankName())}` : 'Connected, waiting for the first update'}</b></div>
         <div class="small muted">${bankBusy ? 'Updating now...' : S.bank.fetchedAt ? `${S.bank.bal ? bankAgeText() + '. ' : ''}SimpleFIN gets new data from the bank about once a day; the app checks for it every hour while open (last checked ${timeAgo(S.bank.fetchedAt)}).` : 'Not updated yet.'}</div>
+        ${bankWatchInfo && bankWatchInfo.on ? `<div class="small muted" style="margin-top:4px">Also checked around the clock by your sync storage, even with the app closed${bankWatchInfo.checked ? ` (last check ${timeAgo(bankWatchInfo.checked)})` : ' (first check within 15 minutes)'}. If the connection breaks, every phone gets a notification.</div>` : ''}
         ${S.bank.error ? `<div class="small neg" style="margin-top:4px">${esc(S.bank.error)}</div>` : ''}
         <div class="btns"><button class="btn small" data-act="bankRefresh">Update now</button><button class="btn small ghost" data-act="bankAccounts">Choose accounts</button></div>
         <div class="btns"><button class="btn small danger" data-act="bankDisconnect">Disconnect bank</button></div></div>`
@@ -2213,6 +2221,7 @@ async function refreshAll() {
   if (syncLinked()) {
     try { if (await checkInbox()) await syncNow(); } catch (e) { }
     try { await syncNow(); await checkPhones(); await notifyOthersOff(); await loadLocalPrice(); } catch (e) { }
+    try { await bankWatchUpdate(); } catch (e) { }
   }
   render();
   // A gas-station question comes first; otherwise, if this phone's notifications are off, offer to turn them on.
@@ -2228,7 +2237,17 @@ syncTakeSnap();
 refreshAll(); // the bank updates if connected and the last update is over an hour old
 // Right after an update: "What's new". Otherwise the one-time "Whose phone is this?" question, once there are
 // paychecks to label.
-setTimeout(() => { if (showFuelQuestion()) return; if (!showWhatsNewIfUpdated() && S && S.incomes.length) askProfileOnce(); }, 600);
+/* Opened from the "sign in again" notification (?fix=1): go straight to the fix steps, and check the bank now.
+   When the app was already open, the notification tells it through the service worker instead. */
+function openFromNote(url) {
+  if (!S || !/[?&]fix=1/.test(String(url || ''))) return false;
+  sheetBankFix(); fetchBank('fix');
+  return true;
+}
+const launchedFix = /[?&]fix=1/.test(location.search);
+if (launchedFix) history.replaceState(null, '', location.pathname);
+if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', e => { if (e.data && e.data.open) setTimeout(() => openFromNote(e.data.open), 300); });
+setTimeout(() => { if (launchedFix && openFromNote('?fix=1')) return; if (showFuelQuestion()) return; if (!showWhatsNewIfUpdated() && S && S.incomes.length) askProfileOnce(); }, 600);
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => { });
 if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === '127.0.0.1' || location.hostname === 'localhost')) {
   // When a new version of the app takes over, reload once so it shows straight away.

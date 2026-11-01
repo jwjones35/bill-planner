@@ -333,6 +333,47 @@ async function notifyNow(note, toName) {
   const data = await encryptNote(await noteKey(cfg), note);
   await api('POST', `/v1/h/${cfg.id}/notify`, k.token, { data, to: toName ? await personTag(toName) : null });
 }
+/* ---------- around-the-clock bank check ----------
+   The sync storage keeps a copy of the read-only SimpleFIN key (it can only read balances, never move money) and
+   checks the connection every few hours, even with the app closed on every phone. If it breaks, every phone gets the
+   "sign in again" notification; when it works again, "working again". Both notes are encrypted here, so the
+   storage can't read them. It keeps no balances or transactions. */
+const BW_SENT = 'billplanner.bankwatch'; // a hash of what was last sent, so it's only sent again when it changes
+let bankWatchInfo = null; // { on, state: 'ok' | 'broken' | 'unknown', checked, changed } from the storage
+async function bankWatchUpdate() {
+  const cfg = syncCfg(); if (!cfg || !S) return;
+  const k = await syncKeys(cfg), acc = bankAccess();
+  let sent = null; try { sent = localStorage.getItem(BW_SENT); } catch (e) { }
+  // The bank was disconnected (on either phone): turn the around-the-clock check off and forget the key.
+  if (!acc) {
+    if (sent || !bankWatchInfo || bankWatchInfo.on) {
+      const g = await api('GET', `/v1/h/${cfg.id}/bankwatch`, k.token);
+      if (g.status === 200 && g.j && g.j.on) await api('DELETE', `/v1/h/${cfg.id}/bankwatch`, k.token);
+      try { localStorage.removeItem(BW_SENT); } catch (e) { }
+    }
+    bankWatchInfo = { on: false }; return;
+  }
+  if (!bankOn()) return; // just connected: wait for the first update from the bank
+  const bank = bankName(), h = await sha256hex(acc + '|' + bank + '|1');
+  if (sent !== h) {
+    const raw = await noteKey(cfg), Bank = bank.charAt(0).toUpperCase() + bank.slice(1);
+    const broken = await encryptNote(raw, { title: `${Bank} needs you to sign in again`, body: "Bill Planner can't see your balance until you do. Tap here to fix it (about a minute).", tag: 'bankwatch', url: './?fix=1' });
+    const fixed = await encryptNote(raw, { title: `${Bank} is working again`, body: 'Your balance is updating by itself again.', tag: 'bankwatch' });
+    const r = await api('PUT', `/v1/h/${cfg.id}/bankwatch`, k.token, { access: acc, broken, fixed });
+    if (r.status === 200) { try { localStorage.setItem(BW_SENT, h); } catch (e) { } }
+  }
+  const g = await api('GET', `/v1/h/${cfg.id}/bankwatch`, k.token);
+  if (g.status === 200 && g.j) bankWatchInfo = g.j;
+  // This phone just heard from the bank without a problem, but the storage still thinks it's broken: tell it.
+  if (bankWatchInfo && bankWatchInfo.state === 'broken' && !S.bank.error && S.bank.fetchedAt && Date.now() - S.bank.fetchedAt < 10 * 60000) await bankWatchPoke();
+}
+// Ask the storage to check the connection right now (at most every 2 minutes; the storage enforces it).
+async function bankWatchPoke() {
+  const cfg = syncCfg(); if (!cfg) return;
+  const k = await syncKeys(cfg);
+  const r = await api('POST', `/v1/h/${cfg.id}/bankwatch`, k.token);
+  if (r.status === 200 && r.j) bankWatchInfo = r.j;
+}
 // Which people have a phone that gets notifications (the storage only knows their codes).
 async function checkPhones() {
   const cfg = syncCfg(); if (!cfg) { offPhones = []; return; }

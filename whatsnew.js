@@ -4,6 +4,11 @@
    Every release adds an entry here, in plain words: added, changed, fixed, removed. */
 const CHANGELOG = [
   {
+    v: '2.2.9', date: '2026-11-01',
+    added: ['The bank connection is now checked around the clock, even when the app is closed on both phones. If it stops working, both phones get a notification: tap it and the app opens straight to the fix. When it works again, you get a "working again" notification.'],
+    changed: ['To do this, your sync storage keeps a copy of the read-only SimpleFIN key. It can only read balances, never move money, and the storage keeps no balances or transactions. Disconnecting the bank under More turns the around-the-clock check off.']
+  },
+  {
     v: '2.2.8', date: '2026-11-01',
     added: ['A big red warning at the top of Home whenever the bank connection stops working or the bank hasn\'t sent anything new for more than a day. While it\'s showing, "Available to spend" is marked NOT CURRENT, so an old number is never mistaken for today\'s.', 'A "Fix the connection" button on that warning. It walks you through reconnecting on SimpleFIN one step at a time, and checks the connection by itself when you come back to the app.']
   },
