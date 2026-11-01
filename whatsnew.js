@@ -4,6 +4,10 @@
    Every release adds an entry here, in plain words: added, changed, fixed, removed. */
 const CHANGELOG = [
   {
+    v: '2.2.7', date: '2026-11-01',
+    changed: ['A new app icon in the comic colors: a calendar page with a teal dollar sign on dark purple. (The icon already on your Home Screen stays the old one. That\'s normal for iPhone, and nothing else changes.)']
+  },
+  {
     v: '2.2.6', date: '2026-11-01',
     fixed: ['A gas-station purchase on a card the app didn\'t know yet was counted against the first vehicle. That used up its fuel, so its owner\'s next stop looked like snacks. Now each purchase only counts for the vehicle of whoever\'s card it was. One on an unknown card waits on Home ("tap to say whose") and is split once you tap a name.']
   },
