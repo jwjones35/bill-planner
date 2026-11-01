@@ -136,15 +136,38 @@ async function bwRun(env, onlyId) {
     if (c.state === 'ok') state = 'ok';
     else { strikes = w.strikes + 1; if (c.sure || strikes >= 2) state = 'broken'; }
     const changed = state !== w.state;
-    await env.DB.prepare('UPDATE bankwatch SET state = ?, strikes = ?, checked = ?, changed = ? WHERE household = ?')
-      .bind(state, strikes, now, changed ? now : w.changed, w.household).run();
     // Notify on a real change (not the very first check after being set up, unless it's already broken).
     const note = changed && state === 'broken' ? w.broken : changed && state === 'ok' && w.state === 'broken' ? w.fixed : null;
+    // A new problem (or a fix) starts the acknowledgements over.
+    await env.DB.prepare('UPDATE bankwatch SET state = ?, strikes = ?, checked = ?, changed = ?, acked = ?, nagged = ? WHERE household = ?')
+      .bind(state, strikes, now, changed ? now : w.changed, changed ? '[]' : w.acked, changed ? (state === 'broken' ? now : 0) : w.nagged, w.household).run();
     console.log(`bankwatch: ${w.state} -> ${state}${note ? (note === w.broken ? ' (sent: sign in again)' : ' (sent: working again)') : ''}`);
     if (note) {
       const subs = (await env.DB.prepare('SELECT endpoint, p256dh, auth FROM subs WHERE household = ?').bind(w.household).all()).results || [];
       for (const s of subs) { try { await sendPush(env, s, note); } catch (e) { } }
     }
+  }
+}
+// While broken: every hour, send "sign in again" again to each phone that hasn't acknowledged it.
+// Not between 10 PM and 7 AM at home (the first alert goes out at any hour).
+const BW_NAG_EVERY = 3600000;
+async function bwNag(env) {
+  const now = Date.now();
+  const rows = (await env.DB.prepare("SELECT household, broken, acked, nagged, tz FROM bankwatch WHERE state = 'broken'").all()).results || [];
+  for (const w of rows) {
+    if (!env.BW_TEST_HOST && now - w.nagged < BW_NAG_EVERY - 60000) continue;
+    const hour = new Date(now - (w.tz || 0) * 60000).getUTCHours();
+    if (!env.BW_TEST_HOST && (hour < 7 || hour >= 22)) continue;
+    let acked; try { acked = new Set(JSON.parse(w.acked)); } catch (e) { acked = new Set(); }
+    const subs = (await env.DB.prepare('SELECT endpoint, p256dh, auth FROM subs WHERE household = ?').bind(w.household).all()).results || [];
+    let to = 0;
+    for (const s of subs) {
+      if (acked.has((await sha256(s.endpoint)).slice(0, 24))) continue;
+      to++;
+      try { await sendPush(env, s, w.broken); } catch (e) { }
+    }
+    console.log(`bankwatch: reminder for ${to} phone(s) not yet acknowledged`);
+    await env.DB.prepare('UPDATE bankwatch SET nagged = ? WHERE household = ?').bind(now, w.household).run();
   }
 }
 
@@ -200,7 +223,7 @@ async function fetchPrices(env, force) {
 }
 
 export default {
-  async scheduled(event, env, ctx) { ctx.waitUntil(Promise.all([sendDue(env), fetchPrices(env).catch(() => { }), bwRun(env).catch(() => { })])); },
+  async scheduled(event, env, ctx) { ctx.waitUntil(Promise.all([sendDue(env), fetchPrices(env).catch(() => { }), bwRun(env).then(() => bwNag(env)).catch(() => { })])); },
   async fetch(req, env) {
     if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors(req) });
     const url = new URL(req.url);
@@ -288,12 +311,21 @@ export default {
           const a = String(body.access || '');
           if (!/^https?:\/\/[^:@\/]+:[^@\/]+@[^\/]+\//.test(a) || a.length > 600 || !bwHostOk(env, a)) return json(req, 400, { error: 'bad access' });
           if (typeof body.broken !== 'string' || typeof body.fixed !== 'string' || body.broken.length > 1500 || body.fixed.length > 1500) return json(req, 400, { error: 'bad notes' });
+          const tz = Number.isInteger(body.tz) && Math.abs(body.tz) <= 840 ? body.tz : 360;
           const old = await env.DB.prepare('SELECT access FROM bankwatch WHERE household = ?').bind(id).first();
-          if (old && old.access === a) await env.DB.prepare('UPDATE bankwatch SET broken = ?, fixed = ?, updated = ? WHERE household = ?').bind(body.broken, body.fixed, Date.now(), id).run();
-          else await env.DB.prepare("INSERT OR REPLACE INTO bankwatch (household, access, broken, fixed, state, strikes, checked, changed, updated) VALUES (?, ?, ?, ?, 'unknown', 0, 0, 0, ?)").bind(id, a, body.broken, body.fixed, Date.now()).run();
+          if (old && old.access === a) await env.DB.prepare('UPDATE bankwatch SET broken = ?, fixed = ?, tz = ?, updated = ? WHERE household = ?').bind(body.broken, body.fixed, tz, Date.now(), id).run();
+          else await env.DB.prepare("INSERT OR REPLACE INTO bankwatch (household, access, broken, fixed, state, strikes, checked, changed, updated, acked, nagged, tz) VALUES (?, ?, ?, ?, 'unknown', 0, 0, 0, ?, '[]', 0, ?)").bind(id, a, body.broken, body.fixed, Date.now(), tz).run();
           return json(req, 200, { ok: true });
         }
-        if (req.method === 'POST') { await bwRun(env, id); }
+        // POST { ack: <this phone's push address> }: this phone has seen the problem; stop its hourly reminders.
+        if (req.method === 'POST' && typeof body.ack === 'string' && body.ack.length < 1000) {
+          const w = await env.DB.prepare('SELECT acked FROM bankwatch WHERE household = ?').bind(id).first();
+          if (w) {
+            let acked; try { acked = JSON.parse(w.acked); } catch (e) { acked = []; }
+            const h = (await sha256(body.ack)).slice(0, 24);
+            if (!acked.includes(h)) { acked.push(h); await env.DB.prepare('UPDATE bankwatch SET acked = ? WHERE household = ?').bind(JSON.stringify(acked.slice(-20)), id).run(); }
+          }
+        } else if (req.method === 'POST') { await bwRun(env, id); }
         if (req.method === 'GET' || req.method === 'POST') {
           const w = await env.DB.prepare('SELECT state, checked, changed FROM bankwatch WHERE household = ?').bind(id).first();
           return json(req, 200, w ? { on: true, state: w.state, checked: w.checked, changed: w.changed } : { on: false });

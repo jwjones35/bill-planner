@@ -51,7 +51,12 @@ CREATE TABLE IF NOT EXISTS bankwatch (
   strikes INTEGER NOT NULL DEFAULT 0,
   checked INTEGER NOT NULL DEFAULT 0,
   changed INTEGER NOT NULL DEFAULT 0,
-  updated INTEGER NOT NULL
+  updated INTEGER NOT NULL,
+  -- While broken, the "sign in again" notification repeats every hour (7 AM to 10 PM home time) to each phone
+  -- that hasn't acknowledged it. acked: hashes of the phones that did; tz: the phones' minutes behind UTC.
+  acked TEXT NOT NULL DEFAULT '[]',
+  nagged INTEGER NOT NULL DEFAULT 0,
+  tz INTEGER NOT NULL DEFAULT 360
 );
 -- One-time codes for adding a phone: the encrypted household key, gone after one use or 15 minutes.
 CREATE TABLE IF NOT EXISTS pairs (

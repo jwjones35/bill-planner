@@ -1,6 +1,6 @@
 // Offline support: keeps a copy of the app's own files so it opens without a connection.
 // Bump VERSION whenever any app file changes, so phones pick up the update.
-const VERSION = 'bp-2.2.9';
+const VERSION = 'bp-2.3.0';
 const FILES = ['./', 'index.html', 'styles.css', 'whatsnew.js', 'sync.js', 'spending.js', 'app.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
 
@@ -36,7 +36,10 @@ self.addEventListener('push', e => {
     try { if (e.data) n = await readNote(e.data.text()); } catch (x) { }
     // url: where tapping it should go inside the app (for example './?fix=1' opens the bank-fix steps).
     const url = typeof n.url === 'string' && n.url.startsWith('./') ? n.url : './';
-    await self.registration.showNotification(n.title, { body: n.body, tag: n.tag, icon: 'icons/icon-192.png', badge: 'icons/icon-192.png', data: { url } });
+    // must: a warning that has to be acknowledged. It stays on screen until tapped (where the phone allows it) and
+    // alerts again each time it repeats, even though it replaces the previous one.
+    const must = n.must === true;
+    await self.registration.showNotification(n.title, { body: n.body, tag: n.tag, icon: 'icons/icon-192.png', badge: 'icons/icon-192.png', data: { url }, requireInteraction: must, renotify: must && !!n.tag });
   })());
 });
 self.addEventListener('notificationclick', e => {

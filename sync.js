@@ -354,18 +354,26 @@ async function bankWatchUpdate() {
     bankWatchInfo = { on: false }; return;
   }
   if (!bankOn()) return; // just connected: wait for the first update from the bank
-  const bank = bankName(), h = await sha256hex(acc + '|' + bank + '|1');
+  const tz = new Date().getTimezoneOffset(); // for the storage's quiet hours (no reminders 10 PM to 7 AM)
+  const bank = bankName(), h = await sha256hex(acc + '|' + bank + '|' + tz + '|2');
   if (sent !== h) {
     const raw = await noteKey(cfg), Bank = bank.charAt(0).toUpperCase() + bank.slice(1);
-    const broken = await encryptNote(raw, { title: `${Bank} needs you to sign in again`, body: "Bill Planner can't see your balance until you do. Tap here to fix it (about a minute).", tag: 'bankwatch', url: './?fix=1' });
+    // must: stays on screen until tapped where the phone allows it. It repeats every hour until acknowledged.
+    const broken = await encryptNote(raw, { title: `⚠ ${Bank} is disconnected`, body: `"Available to spend" is NOT current. Tap to fix it (about a minute). This repeats every hour until you tap it.`, tag: 'bankwatch', url: './?fix=1', must: true });
     const fixed = await encryptNote(raw, { title: `${Bank} is working again`, body: 'Your balance is updating by itself again.', tag: 'bankwatch' });
-    const r = await api('PUT', `/v1/h/${cfg.id}/bankwatch`, k.token, { access: acc, broken, fixed });
+    const r = await api('PUT', `/v1/h/${cfg.id}/bankwatch`, k.token, { access: acc, broken, fixed, tz });
     if (r.status === 200) { try { localStorage.setItem(BW_SENT, h); } catch (e) { } }
   }
   const g = await api('GET', `/v1/h/${cfg.id}/bankwatch`, k.token);
   if (g.status === 200 && g.j) bankWatchInfo = g.j;
   // This phone just heard from the bank without a problem, but the storage still thinks it's broken: tell it.
   if (bankWatchInfo && bankWatchInfo.state === 'broken' && !S.bank.error && S.bank.fetchedAt && Date.now() - S.bank.fetchedAt < 10 * 60000) await bankWatchPoke();
+}
+// This phone has seen the "disconnected" warning: stop its hourly reminders (the other phone's keep going).
+async function bankWatchAck() {
+  const cfg = syncCfg(), n = notifyCfg(); if (!cfg || !n || !n.endpoint) return;
+  const k = await syncKeys(cfg);
+  await api('POST', `/v1/h/${cfg.id}/bankwatch`, k.token, { ack: n.endpoint });
 }
 // Ask the storage to check the connection right now (at most every 2 minutes; the storage enforces it).
 async function bankWatchPoke() {

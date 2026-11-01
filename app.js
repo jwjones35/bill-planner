@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's available to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '2.2.9';
+const APP_VERSION = '2.3.0';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -419,6 +419,39 @@ function bankAlertHtml() {
     : `<button class="btn" data-act="bankRefresh">Check the bank now</button>`;
   return `<div class="bank-alert" role="alert"><div class="ba-title">⚠ ${title}</div>${now}${why}
     <div class="btns">${btns}${p.freshHand ? '' : `<button class="btn ghost" data-act="balances">Enter today's balance</button>`}</div></div>`;
+}
+/* "Disconnected" must be acknowledged on every phone: a pop-up that can't be closed or swiped away until one of
+   its buttons is tapped (once per problem, per phone). Acknowledging, here or by tapping the notification, also
+   stops this phone's hourly reminders from the sync storage. */
+const ACK_SEEN = 'billplanner.bankProblemSeen', ACK_AT = 'billplanner.bankAckAt';
+const lsNum = k => { try { return Number(localStorage.getItem(k)) || 0; } catch (e) { return 0; } };
+const lsSetNum = (k, v) => { try { if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, String(v)); } catch (e) { } };
+function bankMustAck() {
+  if (!S) return false;
+  const p = bankProblem();
+  if (!p || p.kind !== 'error') { lsSetNum(ACK_SEEN, null); return false; }
+  let seen = lsNum(ACK_SEEN);
+  if (!seen) { // first time this phone sees this problem (a notification tapped just before counts)
+    seen = Date.now(); const a = lsNum(ACK_AT); if (a && seen - a < 15 * 60000) seen = a;
+    lsSetNum(ACK_SEEN, seen);
+  }
+  if (lsNum(ACK_AT) >= seen) return false;
+  const sh = $('#sheet');
+  if (sheetLocked() && sh.dataset.bankack) return true;
+  const bank = esc(bankName());
+  if (!openSheet(`<h3 style="color:var(--bad)">⚠ ${capFirst(bank)} is disconnected</h3>
+    <p>Bill Planner can't see your ${bank} balance right now, so <b>"Available to spend" is NOT current</b>. Don't count on it until this is fixed.</p>
+    <p class="small">Until then, check your balance in ${bank}'s own app before spending anything.</p>
+    <div class="btns"><button class="btn block" data-act="bankAckFix">Fix it now</button></div>
+    <div class="btns"><button class="btn ghost block" data-act="bankAckLater">I understand, fix it later</button></div>`, { locked: true })) return false;
+  sh.dataset.bankack = '1';
+  return true;
+}
+function bankAcknowledge() {
+  lsSetNum(ACK_AT, Date.now());
+  const sh = $('#sheet');
+  if (sh.dataset.bankack) { delete sh.dataset.bankack; closeSheet(true); }
+  bankWatchAck().catch(() => { });
 }
 // Step 1: reconnect on SimpleFIN's website.
 function sheetBankFix() {
@@ -1836,6 +1869,8 @@ document.addEventListener('click', e => {
     case 'bankFix': sheetBankFix(); break;
     case 'bankFixGo': S.bank.fixAt = Date.now(); save(); window.open(SIMPLEFIN_URL, '_blank', 'noopener'); closeSheet(); render(); break;
     case 'bankFixCheck': bankFixCheck(true); break;
+    case 'bankAckFix': bankAcknowledge(); sheetBankFix(); break;
+    case 'bankAckLater': bankAcknowledge(); render(); toast('OK. The red warning stays on Home until the connection is fixed.'); break;
     case 'bankDisconnect':
       if (confirm('Disconnect the bank from this phone? Your bills and history stay. To stop it completely, also remove the app connection on SimpleFIN.')) {
         setBankAccess('');
@@ -2225,7 +2260,8 @@ async function refreshAll() {
   }
   render();
   // A gas-station question comes first; otherwise, if this phone's notifications are off, offer to turn them on.
-  if (!showFuelQuestion()) { try { await notifyPrompt(); } catch (e) { } }
+  // The "disconnected" warning comes before everything else.
+  if (!bankMustAck() && !showFuelQuestion()) { try { await notifyPrompt(); } catch (e) { } }
 }
 document.addEventListener('visibilitychange', () => { if (!document.hidden) { render(); refreshAll(); } });
 // While the app is open, check the other phone's changes every 30 seconds.
@@ -2241,13 +2277,14 @@ refreshAll(); // the bank updates if connected and the last update is over an ho
    When the app was already open, the notification tells it through the service worker instead. */
 function openFromNote(url) {
   if (!S || !/[?&]fix=1/.test(String(url || ''))) return false;
+  bankAcknowledge(); // tapping the notification is the acknowledgement
   sheetBankFix(); fetchBank('fix');
   return true;
 }
 const launchedFix = /[?&]fix=1/.test(location.search);
 if (launchedFix) history.replaceState(null, '', location.pathname);
 if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', e => { if (e.data && e.data.open) setTimeout(() => openFromNote(e.data.open), 300); });
-setTimeout(() => { if (launchedFix && openFromNote('?fix=1')) return; if (showFuelQuestion()) return; if (!showWhatsNewIfUpdated() && S && S.incomes.length) askProfileOnce(); }, 600);
+setTimeout(() => { if (launchedFix && openFromNote('?fix=1')) return; if (bankMustAck() || showFuelQuestion()) return; if (!showWhatsNewIfUpdated() && S && S.incomes.length) askProfileOnce(); }, 600);
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => { });
 if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === '127.0.0.1' || location.hostname === 'localhost')) {
   // When a new version of the app takes over, reload once so it shows straight away.

@@ -4,6 +4,13 @@
    Every release adds an entry here, in plain words: added, changed, fixed, removed. */
 const CHANGELOG = [
   {
+    v: '2.3.0', date: '2026-11-01',
+    added: [
+      'When the bank disconnects, the notification now repeats every hour on each phone until that phone acknowledges it (no repeats between 10 PM and 7 AM). Tapping the notification counts as acknowledging it, and opens the fix steps.',
+      'A pop-up in the app that can\'t be closed or swiped away until you tap "Fix it now" or "I understand, fix it later". It shows on every phone, once for each time the bank disconnects.'
+    ]
+  },
+  {
     v: '2.2.9', date: '2026-11-01',
     added: ['The bank connection is now checked around the clock, even when the app is closed on both phones. If it stops working, both phones get a notification: tap it and the app opens straight to the fix. When it works again, you get a "working again" notification.'],
     changed: ['To do this, your sync storage keeps a copy of the read-only SimpleFIN key. It can only read balances, never move money, and the storage keeps no balances or transactions. Disconnecting the bank under More turns the around-the-clock check off.']

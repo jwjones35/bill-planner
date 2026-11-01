@@ -280,6 +280,7 @@ function sheetWho(q) {
 }
 function showFuelQuestion() {
   if (!fuelOn()) return false;
+  if (sheetLocked() && document.getElementById('sheet').dataset.bankack) return true; // the bank warning comes first
   const q = myQs().sort((a, b) => a.created - b.created)[0];
   if (!q) { if (sheetLocked()) closeSheet(true); return false; }
   const sh = document.getElementById('sheet');
