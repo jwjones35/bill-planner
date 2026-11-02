@@ -4,6 +4,10 @@
    Every release adds an entry here, in plain words: added, changed, fixed, removed. */
 const CHANGELOG = [
   {
+    v: '2.5.0', date: '2026-11-01',
+    added: ['On the bill form, under "How the bank shows it", the app now lists charges from your bank that look like the bill (the same amount, or a word from its name). Tap one to fill it in, tap it again to take it out. "See every charge from the last 35 days" shows the rest. No more copying from the bank\'s app.']
+  },
+  {
     v: '2.4.0', date: '2026-11-01',
     added: [
       'Live balance: under More › Bank connection you can connect your bank through Plaid as well. Then the app gets the balance straight from the bank every time it opens, and when you tap "Update now", instead of waiting for SimpleFIN\'s once-a-day copy. Both phones share it; connect it once, from one phone.',

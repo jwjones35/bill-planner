@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's available to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '2.4.0';
+const APP_VERSION = '2.5.0';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -1650,6 +1650,41 @@ function readFreq(fd) {
   else { const a = fd.get('anchor'); if (!a) return null; o.anchor = a; o.day = null; }
   return o;
 }
+// "How the bank shows it": bank charges to pick from instead of typing. First the ones that look like this bill
+// (same amount, or a word from its name), then every charge from the bank's history, newest first.
+function matchPickHtml(name, amount, fee, varies, match) {
+  const have = new Set((match || []).map(normText));
+  const amt = num(amount), total = amt != null ? amt + (num(fee) || 0) : null, words = nameWords(name || '');
+  const seen = new Set(), all = [];
+  for (const t of S.bank.tx) {
+    if (t.amount >= 0 || !t.desc) continue;
+    const phrase = phraseOf(t.desc);
+    if (!phrase || seen.has(phrase)) continue;
+    seen.add(phrase);
+    const paid = -t.amount;
+    const amtHit = amt != null && amt > 0 && (Math.abs(paid - amt) < 0.01 || Math.abs(paid - total) < 0.01 || (varies && Math.abs(paid - amt) <= amt * 0.3));
+    const nameHit = words.some(w => hasWord(t.desc, w));
+    all.push({ t, phrase, score: (amtHit ? 2 : 0) + (nameHit ? 1 : 0), off: amt ? Math.abs(paid - amt) : 0 });
+  }
+  const row = s => `<button type="button" class="row" data-act="pickMatch" data-phrase="${esc(s.phrase)}">
+      <span class="main"><div class="name">${have.has(s.phrase) ? '✓ ' : ''}${esc(s.phrase)}</div><div class="sub">${nice(s.t.date)} · ${esc(s.t.desc)}</div></span>
+      <span class="amt num">${fm(-s.t.amount)}</span></button>`;
+  const likely = all.filter(s => s.score).sort((a, b) => b.score - a.score || a.off - b.off || b.t.date.localeCompare(a.t.date)).slice(0, 5);
+  return `<div class="small" style="margin-top:6px"><b>${likely.length ? 'Charges at the bank that look like this bill' : 'Pick it from the bank'}</b> · tap one to use it</div>
+    ${likely.length ? `<div class="card" style="margin-top:4px">${likely.map(row).join('')}</div>`
+      : `<p class="hint" style="margin-top:2px">No charge in the last 35 days has this bill's amount or name. Type the usual amount above, or pick from the full list below.</p>`}
+    <details style="margin-top:6px"><summary class="small"><a>See every charge from the last 35 days (${all.length})</a></summary>
+      <div class="card" style="margin-top:4px">${all.map(row).join('') || '<div class="empty">No charges yet.</div>'}</div></details>`;
+}
+// Redraw the pick list as the name or amount is typed.
+function refreshMatchPick(f) {
+  const box = f && f.querySelector('#bMatchPick');
+  if (!box) return;
+  const open = box.querySelector('details') && box.querySelector('details').open;
+  box.innerHTML = matchPickHtml(f.elements.name.value, f.elements.amount.value, f.elements.fee.value, f.elements.varies.checked,
+    String(f.elements.match.value || '').split(',').map(normText).filter(Boolean));
+  if (open) box.querySelector('details').open = true;
+}
 // draft: values to pre-fill a new bill (for example one made from a bank transaction).
 function sheetBill(b, draft) {
   const x = b || draft || { freq: 'monthly' };
@@ -1668,6 +1703,7 @@ function sheetBill(b, draft) {
     <p class="hint">The company takes the money by itself. After the due date, the app waits for the charge to show at the bank instead of calling the bill past due, and warns you if it still hasn't come out after 3 business days.</p>
     <label for="bMatch">How the bank shows it</label><input id="bMatch" name="match" value="${esc((x.match || []).join(', '))}" autocapitalize="characters" placeholder="Filled in when you confirm a bank payment">
     <p class="hint">Words from the bank's description used to recognize this bill, for example TOWN MULDROW. Only used for matching; the name above is what you see. Separate several with commas.</p>
+    ${bankOn() && S.bank.tx.length ? `<div id="bMatchPick">${matchPickHtml(x.name, x.amount, x.fee, x.varies, x.match)}</div>` : ''}
     <label class="check"><input type="checkbox" name="active"${x.active === false ? '' : ' checked'}> Still paying this</label>
     <label for="bNote">Note</label><input id="bNote" name="note" value="${esc(x.note || '')}" placeholder="Optional">
     ${hist.length ? `<label>Recent payments</label><div class="small num">${hist.map(p => `<div class="toolbar"><span>${nice(p.due)}</span><span>${fm(p.amount)}${p.fee ? ` <span class="${b && b.fee && p.fee > b.fee + 0.01 ? 'neg' : 'muted'}">(includes ${fm(p.fee)} fee)</span>` : ''}</span></div>`).join('')}</div>` : ''}
@@ -1972,6 +2008,15 @@ document.addEventListener('click', e => {
   switch (act) {
     case 'tab': tab = el.dataset.tab; try { sessionStorage.setItem('bp.tab', tab); } catch (x) { } closeSheet(); render(); window.scrollTo(0, 0); break;
     case 'close': closeSheet(); break;
+    case 'pickMatch': {
+      const f = el.closest('form'), inp = f && f.elements.match;
+      if (!inp) break;
+      const list = String(inp.value || '').split(',').map(normText).filter(Boolean), p = el.dataset.phrase;
+      inp.value = (list.includes(p) ? list.filter(x => x !== p) : [...list, p]).join(', ');
+      refreshMatchPick(f);
+      toast(list.includes(p) ? `Removed ${p}. Tap Save to keep the change.` : `Added ${p}. Tap Save to keep it.`);
+      break;
+    }
     case 'pay': sheetPay(findB(id), d); break;
     case 'recv': sheetRecv(findI(id), d); break;
     case 'unpay': {
@@ -2146,8 +2191,13 @@ document.addEventListener('click', e => {
       else if (act) spendAct(act, el);
   }
 });
+document.addEventListener('input', e => {
+  const el = e.target;
+  if (el.form && el.form.id === 'fBill' && ['name', 'amount', 'fee', 'match'].includes(el.name)) refreshMatchPick(el.form);
+});
 document.addEventListener('change', e => {
   const el = e.target;
+  if (el.form && el.form.id === 'fBill' && el.name === 'varies') refreshMatchPick(el.form);
   if (el.dataset.act === 'restore' && el.files && el.files[0]) { restoreFile(el.files[0]); el.value = ''; }
   if (el.dataset.act === 'freqChange') {
     const f = el.form; const m = el.value === 'monthly';
