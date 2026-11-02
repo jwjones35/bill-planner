@@ -195,7 +195,8 @@ const plaidAccounts = j => (j.accounts || []).map(a => ({
   current: a.balances && a.balances.current != null ? a.balances.current : null
 }));
 const PLAID_MIN_GAP = 30000; // the same answer is reused for 30 seconds (both phones opening at once, double taps)
-const PLAID_TX_GAP = 120000; // purchases change less often: reuse the list for 2 minutes
+const PLAID_TX_GAP = 60000; // the purchase list is reused for 1 minute
+const PLAID_REFRESH_GAP = 15 * 60000; // ask Plaid to check the bank for new purchases at most every 15 minutes
 async function plaidRoute(req, env, id, body) {
   if (!env.PLAID_CLIENT_ID || !env.PLAID_SECRET || !env.PLAID_HOST) return { s: 503, b: { error: 'not set up' } };
   const row = await env.DB.prepare('SELECT * FROM plaid WHERE household = ?').bind(id).first();
@@ -234,15 +235,24 @@ async function plaidRoute(req, env, id, body) {
     if (!row) return { s: 404, b: { error: { code: 'NOT_CONNECTED', msg: 'No live balance connection yet.' } } };
     const now = Date.now();
     const c = await env.DB.prepare('SELECT last, cache FROM plaidtx WHERE household = ?').bind(id).first();
-    if (c && c.cache && now - c.last < PLAID_TX_GAP) return { s: 200, b: JSON.parse(c.cache) };
-    const day = ms => new Date(ms - 6 * 3600000).toISOString().slice(0, 10); // US Central-ish calendar day
+    const prev = c && c.cache ? JSON.parse(c.cache) : null;
+    if (prev && now - c.last < PLAID_TX_GAP) return { s: 200, b: prev };
+    // Plaid only updates its purchase list on its own schedule (it went 3 days without one), so ask it to
+    // check the bank now. That runs in the background; the new purchases show on the next ask, a minute or so later.
+    let refreshed = prev && prev.refreshed || 0;
+    if (now - refreshed >= PLAID_REFRESH_GAP) {
+      const rf = await plaidCall(env, '/transactions/refresh', { access_token: row.token });
+      console.log(`plaid: refresh ${rf.error ? 'error ' + rf.error.code : 'ok'}`);
+      if (!rf.error) refreshed = now;
+    }
+    const day =ms => new Date(ms - 6 * 3600000).toISOString().slice(0, 10); // US Central-ish calendar day
     const opts = { count: 250 };
     const acct = String(body.account || '');
     if (/^[A-Za-z0-9_-]{8,80}$/.test(acct)) opts.account_ids = [acct];
     const r = await plaidCall(env, '/transactions/get', { access_token: row.token, start_date: day(now - 10 * 86400000), end_date: day(now + 86400000), options: opts });
-    const out = r.error ? { error: r.error, at: now } : {
-      at: now,
-      tx: (r.data.transactions || []).map(t => ({
+    const out = r.error ? { error: r.error, at: now, refreshed } : {
+      at: now, refreshed,
+      tx:(r.data.transactions || []).map(t => ({
         id: t.transaction_id, acct: t.account_id, date: t.authorized_date || t.date, amount: t.amount,
         name: t.merchant_name || t.name || '', pending: !!t.pending
       }))

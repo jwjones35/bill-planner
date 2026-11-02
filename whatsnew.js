@@ -4,6 +4,10 @@
    Every release adds an entry here, in plain words: added, changed, fixed, removed. */
 const CHANGELOG = [
   {
+    v: '2.6.1', date: '2026-11-02',
+    fixed: ['"Just in" purchases didn\'t show, because Plaid only updated its list of purchases now and then (it was 3 days behind). The app now asks Plaid to check the bank for new purchases (at most every 15 minutes), and checks for them every 2 minutes while it\'s open.']
+  },
+  {
     v: '2.6.0', date: '2026-11-02',
     added: ['"Spending since..." on Home now shows purchases made today, straight from the bank through the live balance connection (marked "Just in"). Before, they only showed once SimpleFIN listed them, usually the next day, even though the balance already had them taken out. When SimpleFIN catches up, the full entry replaces the "Just in" one, so nothing is counted twice.']
   },

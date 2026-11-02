@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's available to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '2.6.0';
+const APP_VERSION = '2.6.1';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -423,7 +423,7 @@ function pickLive(accts) {
 async function fetchLive(force) {
   if (!S || !bankOn() || !syncLinked() || !liveOn() || liveBusy) return false;
   const m = S.bank.manual;
-  if (!force && isLive(m) && Date.now() - m.at < LIVE_EVERY) return true;
+  if (!force && isLive(m) && Date.now() - m.at < LIVE_EVERY) { fetchLiveTx(false).then(ok => { if (ok) render(); }).catch(() => { }); return true; }
   liveBusy = true;
   const r = await liveCall('POST', { step: 'balance' });
   liveBusy = false;
@@ -444,10 +444,11 @@ async function fetchLive(force) {
    SimpleFIN lists it (SimpleFIN only refreshes about once a day). Kept on this phone only, never synced or backed up.
    Once SimpleFIN has the same purchase (same amount, within 4 days), the SimpleFIN one is shown instead. */
 const LIVE_TX_KEY = 'billplanner.liveTx';
+const LIVE_TX_EVERY = 2 * 60000;
 let liveTx = (() => { try { const j = JSON.parse(localStorage.getItem(LIVE_TX_KEY) || 'null'); return j && Array.isArray(j.tx) ? j : { at: 0, tx: [] }; } catch (e) { return { at: 0, tx: [] }; } })();
 async function fetchLiveTx(force) {
   if (!S || !bankOn() || !syncLinked() || !liveOn()) return false;
-  if (!force && Date.now() - liveTx.at < LIVE_EVERY) return true;
+  if (!force && Date.now() - liveTx.at < LIVE_TX_EVERY) return true;
   const r = await liveCall('POST', { step: 'tx', account: S.bank.liveAcct || '' });
   const j = r.j || {};
   if (r.status !== 200 || j.error || !Array.isArray(j.tx)) return false;
