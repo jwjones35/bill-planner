@@ -171,6 +171,70 @@ async function bwNag(env) {
   }
 }
 
+/* ---------- live balance from the bank (Plaid) ----------
+   SimpleFIN only gets new numbers from the bank about once a day. Plaid's Balance asks the bank right now.
+   The household's Plaid access token stays here (never sent to the phones); the phones ask for the balance.
+   Needs PLAID_CLIENT_ID (wrangler.toml), the Cloudflare secret PLAID_SECRET and PLAID_HOST (Plaid's address).
+   The free Trial plan allows 10 bank connections in total, ever, so a connection is only made on purpose. */
+async function plaidCall(env, path, body) {
+  let r;
+  try {
+    r = await fetch(String(env.PLAID_HOST).replace(/\/$/, '') + path, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(Object.assign({ client_id: env.PLAID_CLIENT_ID, secret: String(env.PLAID_SECRET || '').replace(/^﻿/, '').trim() }, body))
+    });
+  } catch (e) { return { error: { code: 'UNREACHABLE', msg: "Couldn't reach Plaid." } }; }
+  let j = null; try { j = await r.json(); } catch (e) { }
+  if (!r.ok || !j) return { error: { code: (j && j.error_code) || 'HTTP_' + r.status, msg: (j && (j.display_message || j.error_message)) || 'Plaid answered with error ' + r.status + '.' } };
+  return { data: j };
+}
+// Only what the phones need: which account, and its balances.
+const plaidAccounts = j => (j.accounts || []).map(a => ({
+  id: a.account_id, name: a.official_name || a.name || 'Account', mask: a.mask || '', type: a.type, subtype: a.subtype,
+  available: a.balances && a.balances.available != null ? a.balances.available : null,
+  current: a.balances && a.balances.current != null ? a.balances.current : null
+}));
+const PLAID_MIN_GAP = 30000; // the same answer is reused for 30 seconds (both phones opening at once, double taps)
+async function plaidRoute(req, env, id, body) {
+  if (!env.PLAID_CLIENT_ID || !env.PLAID_SECRET || !env.PLAID_HOST) return { s: 503, b: { error: 'not set up' } };
+  const row = await env.DB.prepare('SELECT * FROM plaid WHERE household = ?').bind(id).first();
+  const step = String(body.step || '');
+  if (req.method === 'GET') return { s: 200, b: row ? { on: true, last: row.last, institution: row.institution } : { on: false } };
+  if (req.method === 'POST' && step === 'link') {
+    // A one-time code that opens Plaid's own sign-in window on the phone. update: fix an existing connection.
+    const opts = { client_name: 'Bill Planner', user: { client_user_id: (await sha256('bp|' + id)).slice(0, 32) }, country_codes: ['US'], language: 'en' };
+    if (body.update && row) opts.access_token = row.token; else opts.products = ['transactions'];
+    const r = await plaidCall(env, '/link/token/create', opts);
+    return r.error ? { s: 502, b: { error: r.error } } : { s: 200, b: { link_token: r.data.link_token } };
+  }
+  if (req.method === 'POST' && step === 'exchange') {
+    const pt = String(body.public_token || '');
+    if (!/^public-[a-z]+-[0-9a-f-]{20,80}$/.test(pt)) return { s: 400, b: { error: 'bad token' } };
+    const r = await plaidCall(env, '/item/public_token/exchange', { public_token: pt });
+    if (r.error) return { s: 502, b: { error: r.error } };
+    // Replacing an earlier connection: tell Plaid to forget the old one.
+    if (row && row.token !== r.data.access_token) await plaidCall(env, '/item/remove', { access_token: row.token });
+    const inst = String(body.institution || '').slice(0, 80);
+    await env.DB.prepare('INSERT OR REPLACE INTO plaid (household, token, item, institution, created, last, cache) VALUES (?, ?, ?, ?, ?, 0, NULL)').bind(id, r.data.access_token, r.data.item_id, inst, Date.now()).run();
+    return { s: 200, b: { ok: true } };
+  }
+  if (req.method === 'POST' && step === 'balance') {
+    if (!row) return { s: 404, b: { error: { code: 'NOT_CONNECTED', msg: 'No live balance connection yet.' } } };
+    const now = Date.now();
+    if (row.cache && now - row.last < PLAID_MIN_GAP) return { s: 200, b: JSON.parse(row.cache) };
+    const r = await plaidCall(env, '/accounts/balance/get', { access_token: row.token });
+    const out = r.error ? { error: r.error, at: now } : { accounts: plaidAccounts(r.data), at: now };
+    await env.DB.prepare('UPDATE plaid SET last = ?, cache = ? WHERE household = ?').bind(now, JSON.stringify(out), id).run();
+    console.log(`plaid: balance ${r.error ? 'error ' + r.error.code : 'ok'}`);
+    return { s: 200, b: out };
+  }
+  if (req.method === 'DELETE') {
+    if (row) { await plaidCall(env, '/item/remove', { access_token: row.token }); await env.DB.prepare('DELETE FROM plaid WHERE household = ?').bind(id).run(); }
+    return { s: 200, b: { ok: true } };
+  }
+  return { s: 405, b: { error: 'method not allowed' } };
+}
+
 // For the encryption test on the developer's PC (ignored by Cloudflare).
 export const _test = { encryptPush, vapid };
 
@@ -247,7 +311,7 @@ export default {
       }
       return json(req, 405, { error: 'method not allowed' });
     }
-    const m = url.pathname.match(/^\/v1\/h\/([A-Za-z0-9_-]{16,64})(?:\/(sub|sched|test|notify|subs|fuelprice|inbox|bankwatch))?$/);
+    const m = url.pathname.match(/^\/v1\/h\/([A-Za-z0-9_-]{16,64})(?:\/(sub|sched|test|notify|subs|fuelprice|inbox|bankwatch|plaid))?$/);
     if (!m) return json(req, 404, { error: 'not found' });
     const id = m[1];
     const token = (req.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
@@ -332,6 +396,8 @@ export default {
         }
         if (req.method === 'DELETE') { await env.DB.prepare('DELETE FROM bankwatch WHERE household = ?').bind(id).run(); return json(req, 200, { ok: true }); }
       }
+      // The live balance (Plaid): GET status, POST { step: 'link' | 'exchange' | 'balance' }, DELETE to disconnect.
+      if (m[2] === 'plaid') { const r = await plaidRoute(req, env, id, body); return json(req, r.s, r.b); }
       // Which people have a phone set up for notifications (their codes only).
       if (m[2] === 'subs' && req.method === 'GET') {
         const subs = (await env.DB.prepare('SELECT who FROM subs WHERE household = ?').bind(id).all()).results || [];
@@ -376,6 +442,8 @@ export default {
         await env.DB.prepare('DELETE FROM subs WHERE household = ?').bind(id).run();
         await env.DB.prepare('DELETE FROM sched WHERE household = ?').bind(id).run();
         await env.DB.prepare('DELETE FROM bankwatch WHERE household = ?').bind(id).run();
+        const p = await env.DB.prepare('SELECT token FROM plaid WHERE household = ?').bind(id).first();
+        if (p) { await plaidCall(env, '/item/remove', { access_token: p.token }).catch(() => { }); await env.DB.prepare('DELETE FROM plaid WHERE household = ?').bind(id).run(); }
       }
       return json(req, 200, { ok: true });
     }

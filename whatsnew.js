@@ -4,6 +4,13 @@
    Every release adds an entry here, in plain words: added, changed, fixed, removed. */
 const CHANGELOG = [
   {
+    v: '2.4.0', date: '2026-11-01',
+    added: [
+      'Live balance: under More › Bank connection you can connect your bank through Plaid as well. Then the app gets the balance straight from the bank every time it opens, and when you tap "Update now", instead of waiting for SimpleFIN\'s once-a-day copy. Both phones share it; connect it once, from one phone.',
+      'If the live balance stops working (for example the bank wants you to sign in again), the app says so and has a "Sign in again" button. Until then it uses SimpleFIN\'s balance, with the age warning.'
+    ]
+  },
+  {
     v: '2.3.1', date: '2026-11-01',
     added: [
       'Under "Available to spend" the app now always says when the bank\'s balance is from, for example "as of today at 11:43 AM (6 hours ago)". The bank connection only gets new numbers from the bank now and then, so anything spent since that time isn\'t included yet.',

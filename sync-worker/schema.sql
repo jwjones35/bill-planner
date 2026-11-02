@@ -64,3 +64,15 @@ CREATE TABLE IF NOT EXISTS pairs (
   data TEXT NOT NULL,
   expires INTEGER NOT NULL
 );
+
+-- Live balance (Plaid). token: the household's Plaid access token (read-only balances; it can never move money).
+-- It never leaves the storage. cache: the last answer, reused for 30 seconds; last: when it was asked.
+CREATE TABLE IF NOT EXISTS plaid (
+  household TEXT PRIMARY KEY,
+  token TEXT NOT NULL,
+  item TEXT,
+  institution TEXT,
+  created INTEGER NOT NULL,
+  last INTEGER NOT NULL DEFAULT 0,
+  cache TEXT
+);

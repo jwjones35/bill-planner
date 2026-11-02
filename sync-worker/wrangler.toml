@@ -10,6 +10,9 @@ crons = ["*/15 * * * *"]
 [vars]
 VAPID_PUBLIC = "BFm5sbs8xOWSsWH4UCisiZ3HgqaVdCP3T3Lf78DbRUrZqZO55hjrDlkQFxE0Z2IPNogL9BgPFaqKhS8_csft9Bg"
 VAPID_SUBJECT = "https://jwjones35.github.io/bill-planner/"
+# Live balance (Plaid). The secret half is the Cloudflare secret PLAID_SECRET.
+PLAID_CLIENT_ID = "6ae7db351cceab000d2da8fd"
+PLAID_HOST = "https://production.plaid.com"
 
 [[d1_databases]]
 binding = "DB"

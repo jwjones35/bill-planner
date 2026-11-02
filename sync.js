@@ -79,7 +79,7 @@ const SYNC_COLL = {
   fuelQ: r => r.id, fuelFlags: r => r.id, vehicles: r => r.id
 };
 const SYNC_FIELDS = ['setupDate', 'balances', 'everydayPerWeek', 'savingsBuffer', 'suggestSavings', 'lastBackup', 'autopayWait', 'cards', 'limits', 'fuelSince', 'txWho', 'txEdit'];
-const SYNC_BANK_LWW = ['labels', 'txNames', 'manual', 'feeAlerts', 'priceAlerts'];
+const SYNC_BANK_LWW = ['labels', 'txNames', 'manual', 'feeAlerts', 'priceAlerts', 'liveAcct'];
 const SYNC_BANK_UNION = ['ignore', 'noFeePairs', 'feeRules'];
 const SYNC_BANK_FEED = ['accounts', 'tx', 'bal', 'fetchedAt', 'error', 'fetchLog', 'checkingId', 'savingsId'];
 const noUpd = (k, v) => (k === 'upd' ? undefined : v);
