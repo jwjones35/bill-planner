@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's available to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '2.5.0';
+const APP_VERSION = '2.6.0';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -436,7 +436,54 @@ async function fetchLive(force) {
   // Bills marked paid and spending recorded in the app that the bank hasn't shown yet keep counting.
   S.bank.manual = { amount, at: j.at, keep: [...inTransitPays(), ...inTransitSpends()].map(itemKey), bankBal: S.bank.bal ? S.bank.bal.checking : null, live: true };
   save(); render();
+  // Then the purchases behind that balance, for the spending list.
+  fetchLiveTx(force).then(ok => { if (ok) render(); }).catch(() => { });
   return true;
+}
+/* Recent purchases straight from the bank (Plaid), so a purchase made today shows in "Spending since..." before
+   SimpleFIN lists it (SimpleFIN only refreshes about once a day). Kept on this phone only, never synced or backed up.
+   Once SimpleFIN has the same purchase (same amount, within 4 days), the SimpleFIN one is shown instead. */
+const LIVE_TX_KEY = 'billplanner.liveTx';
+let liveTx = (() => { try { const j = JSON.parse(localStorage.getItem(LIVE_TX_KEY) || 'null'); return j && Array.isArray(j.tx) ? j : { at: 0, tx: [] }; } catch (e) { return { at: 0, tx: [] }; } })();
+async function fetchLiveTx(force) {
+  if (!S || !bankOn() || !syncLinked() || !liveOn()) return false;
+  if (!force && Date.now() - liveTx.at < LIVE_EVERY) return true;
+  const r = await liveCall('POST', { step: 'tx', account: S.bank.liveAcct || '' });
+  const j = r.j || {};
+  if (r.status !== 200 || j.error || !Array.isArray(j.tx)) return false;
+  const acct = S.bank.liveAcct;
+  liveTx = {
+    at: Date.now(),
+    tx: j.tx.filter(t => !acct || t.acct === acct).map(t => ({
+      id: 'plaid:' + t.id, date: String(t.date || today()).slice(0, 10), amount: -Number(t.amount),
+      desc: normText(t.name || 'Purchase'), pending: !!t.pending, live: true
+    })).filter(t => !isNaN(t.amount))
+  };
+  try { localStorage.setItem(LIVE_TX_KEY, JSON.stringify(liveTx)); } catch (e) { }
+  return true;
+}
+// Plaid purchases since `since` that SimpleFIN hasn't listed yet, and that aren't a bill already marked paid
+// or spending already entered by hand (those show elsewhere).
+function liveOnlySpend(since) {
+  if (!liveOn() || !liveTx.tx.length) return [];
+  const cents = a => Math.round(a * 100);
+  const used = new Set();
+  const claim = (list, amt, date, idOf, dateOf) => {
+    const m = list.find(x => !used.has(idOf(x)) && cents(x.amt) === amt && Math.abs(diffDays(dateOf(x), date)) <= 4);
+    if (m) used.add(idOf(m));
+    return !!m;
+  };
+  const sf = S.bank.tx.filter(t => t.amount < 0).map(t => ({ id: 'sf:' + t.id, amt: -t.amount, date: t.date }));
+  const paid = inTransitPays().map(p => ({ id: 'pay:' + p.billId + '|' + p.due, amt: p.amount || 0, date: p.paidOn || today() }));
+  const hand = S.spending.filter(x => !x.txId).map(x => ({ id: 'hand:' + x.id, amt: x.amount, date: x.date }));
+  return liveTx.tx
+    .filter(t => t.amount < 0 && t.date >= since && !(labelFor(t) || {}).ignore)
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .filter(t => {
+      const amt = cents(-t.amount);
+      return !claim(sf, amt, t.date, x => x.id, x => x.date) && !claim(paid, amt, t.date, x => x.id, x => x.date) && !claim(hand, amt, t.date, x => x.id, x => x.date);
+    })
+    .sort((a, b) => b.date.localeCompare(a.date));
 }
 // "Update now": the live balance when there is one, otherwise SimpleFIN.
 async function bankRefreshNow() {
@@ -1308,10 +1355,12 @@ function viewHome() {
   bankSpend = bankSpend.filter(t => feeOf[t.id] !== null);
   const linked = new Set(S.spending.map(x => x.txId).filter(Boolean));
   const handSpend = spendSince(since).filter(x => !x.txId);
-  if (bankSpend.length || handSpend.length) {
-    const total = sum(bankSpend.map(t => -t.amount + (feeOf[t.id] ? -feeOf[t.id].amount : 0))) + sum(handSpend.map(x => x.amount));
-    const n = bankSpend.length + handSpend.length;
+  const liveSpend = bankOn() ? liveOnlySpend(since) : [];
+  if (bankSpend.length || handSpend.length || liveSpend.length) {
+    const total = sum(bankSpend.map(t => -t.amount + (feeOf[t.id] ? -feeOf[t.id].amount : 0))) + sum(handSpend.map(x => x.amount)) + sum(liveSpend.map(t => -t.amount));
+    const n = bankSpend.length + handSpend.length + liveSpend.length;
     h += `<details class="card" style="margin-top:10px"><summary class="row"><span class="main"><div class="name">Spending since ${nice(since)}</div><div class="sub">${n} purchase${n === 1 ? '' : 's'}${bankOn() ? ` · from ${esc(bankName())}` : ''} · tap to see</div></span><span class="amt num">${fm(total)}</span></summary>
+      ${liveSpend.map(t => `<div class="row"><span class="dot soon"></span><span class="main"><div class="name">${esc(txName(t))} <span class="tag">Just in</span></div><div class="sub">${nice(t.date)}${t.pending ? ' · pending' : ''} · straight from ${esc(bankName())}; you can name it once the full bank list has it (usually by tomorrow)</div></span><span class="amt num">${fm(-t.amount)}</span></div>`).join('')}
       ${handSpend.map(x => `<button class="row" data-act="spendEdit" data-id="${x.id}"><span class="dot ok"></span><span class="main"><div class="name">${esc(x.what)}${x.note ? ` <span class="muted" style="font-weight:400">· ${esc(x.note)}</span>` : ''}</div><div class="sub">${nice(x.date)} · ${x.cash ? 'cash, entered by hand' : 'entered by hand' + (bankOn() ? ', not at the bank yet' : '')}</div></span><span class="amt num">${fm(x.amount)}</span></button>`).join('')}
       ${bankSpend.map(t => { const l = labelFor(t), ck = txCat(t), who = whoOfTx(t);
         const catTag = ck === 'station' ? stationTag(t) : ck ? CATS[ck].name : '';

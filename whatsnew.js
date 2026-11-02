@@ -4,6 +4,10 @@
    Every release adds an entry here, in plain words: added, changed, fixed, removed. */
 const CHANGELOG = [
   {
+    v: '2.6.0', date: '2026-11-02',
+    added: ['"Spending since..." on Home now shows purchases made today, straight from the bank through the live balance connection (marked "Just in"). Before, they only showed once SimpleFIN listed them, usually the next day, even though the balance already had them taken out. When SimpleFIN catches up, the full entry replaces the "Just in" one, so nothing is counted twice.']
+  },
+  {
     v: '2.5.0', date: '2026-11-01',
     added: ['On the bill form, under "How the bank shows it", the app now lists charges from your bank that look like the bill (the same amount, or a word from its name). Tap one to fill it in, tap it again to take it out. "See every charge from the last 35 days" shows the rest. No more copying from the bank\'s app.']
   },

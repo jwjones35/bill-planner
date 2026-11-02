@@ -195,6 +195,7 @@ const plaidAccounts = j => (j.accounts || []).map(a => ({
   current: a.balances && a.balances.current != null ? a.balances.current : null
 }));
 const PLAID_MIN_GAP = 30000; // the same answer is reused for 30 seconds (both phones opening at once, double taps)
+const PLAID_TX_GAP = 120000; // purchases change less often: reuse the list for 2 minutes
 async function plaidRoute(req, env, id, body) {
   if (!env.PLAID_CLIENT_ID || !env.PLAID_SECRET || !env.PLAID_HOST) return { s: 503, b: { error: 'not set up' } };
   const row = await env.DB.prepare('SELECT * FROM plaid WHERE household = ?').bind(id).first();
@@ -228,8 +229,30 @@ async function plaidRoute(req, env, id, body) {
     console.log(`plaid: balance ${r.error ? 'error ' + r.error.code : 'ok'}`);
     return { s: 200, b: out };
   }
+  if (req.method === 'POST' && step === 'tx') {
+    // The last 10 days of purchases, so the spending list shows today's ones before SimpleFIN has them.
+    if (!row) return { s: 404, b: { error: { code: 'NOT_CONNECTED', msg: 'No live balance connection yet.' } } };
+    const now = Date.now();
+    const c = await env.DB.prepare('SELECT last, cache FROM plaidtx WHERE household = ?').bind(id).first();
+    if (c && c.cache && now - c.last < PLAID_TX_GAP) return { s: 200, b: JSON.parse(c.cache) };
+    const day = ms => new Date(ms - 6 * 3600000).toISOString().slice(0, 10); // US Central-ish calendar day
+    const opts = { count: 250 };
+    const acct = String(body.account || '');
+    if (/^[A-Za-z0-9_-]{8,80}$/.test(acct)) opts.account_ids = [acct];
+    const r = await plaidCall(env, '/transactions/get', { access_token: row.token, start_date: day(now - 10 * 86400000), end_date: day(now + 86400000), options: opts });
+    const out = r.error ? { error: r.error, at: now } : {
+      at: now,
+      tx: (r.data.transactions || []).map(t => ({
+        id: t.transaction_id, acct: t.account_id, date: t.authorized_date || t.date, amount: t.amount,
+        name: t.merchant_name || t.name || '', pending: !!t.pending
+      }))
+    };
+    await env.DB.prepare('INSERT OR REPLACE INTO plaidtx (household, last, cache) VALUES (?, ?, ?)').bind(id, now, JSON.stringify(out)).run();
+    console.log(`plaid: tx ${r.error ? 'error ' + r.error.code : 'ok ' + out.tx.length}`);
+    return { s: 200, b: out };
+  }
   if (req.method === 'DELETE') {
-    if (row) { await plaidCall(env, '/item/remove', { access_token: row.token }); await env.DB.prepare('DELETE FROM plaid WHERE household = ?').bind(id).run(); }
+    if (row) { await plaidCall(env, '/item/remove', { access_token: row.token }); await env.DB.prepare('DELETE FROM plaid WHERE household = ?').bind(id).run(); await env.DB.prepare('DELETE FROM plaidtx WHERE household = ?').bind(id).run(); }
     return { s: 200, b: { ok: true } };
   }
   return { s: 405, b: { error: 'method not allowed' } };
@@ -444,6 +467,7 @@ export default {
         await env.DB.prepare('DELETE FROM bankwatch WHERE household = ?').bind(id).run();
         const p = await env.DB.prepare('SELECT token FROM plaid WHERE household = ?').bind(id).first();
         if (p) { await plaidCall(env, '/item/remove', { access_token: p.token }).catch(() => { }); await env.DB.prepare('DELETE FROM plaid WHERE household = ?').bind(id).run(); }
+        await env.DB.prepare('DELETE FROM plaidtx WHERE household = ?').bind(id).run();
       }
       return json(req, 200, { ok: true });
     }

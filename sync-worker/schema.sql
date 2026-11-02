@@ -76,3 +76,10 @@ CREATE TABLE IF NOT EXISTS plaid (
   last INTEGER NOT NULL DEFAULT 0,
   cache TEXT
 );
+
+-- Recent purchases from Plaid, kept for 2 minutes so both phones share one answer.
+CREATE TABLE IF NOT EXISTS plaidtx (
+  household TEXT PRIMARY KEY,
+  last INTEGER NOT NULL DEFAULT 0,
+  cache TEXT
+);
