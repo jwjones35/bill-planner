@@ -4,6 +4,14 @@
    Every release adds an entry here, in plain words: added, changed, fixed, removed. */
 const CHANGELOG = [
   {
+    v: '2.3.1', date: '2026-11-01',
+    added: [
+      'Under "Available to spend" the app now always says when the bank\'s balance is from, for example "as of today at 11:43 AM (6 hours ago)". The bank connection only gets new numbers from the bank now and then, so anything spent since that time isn\'t included yet.',
+      'When the balance is more than 3 hours old, an orange warning says to check the bank\'s own app before spending, with a button to enter today\'s balance.'
+    ],
+    changed: ['"Update now" now says plainly whether the bank sent anything new, instead of "Updated a moment ago already".']
+  },
+  {
     v: '2.3.0', date: '2026-11-01',
     added: [
       'When the bank disconnects, the notification now repeats every hour on each phone until that phone acknowledges it (no repeats between 10 PM and 7 AM). Tapping the notification counts as acknowledging it, and opens the fix steps.',

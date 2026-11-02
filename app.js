@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's available to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '2.3.0';
+const APP_VERSION = '2.3.1';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -358,7 +358,8 @@ async function fetchBank(force) {
   let log = S.bank.fetchLog || {};
   if (log.day !== today()) log = { day: today(), count: 0 };
   if (!force && S.bank.fetchedAt && now - S.bank.fetchedAt < HOUR) return;
-  if (force === true && S.bank.fetchedAt && now - S.bank.fetchedAt < 2 * 60000) { toast('Updated a moment ago already.'); return; }
+  if (force === true && S.bank.fetchedAt && now - S.bank.fetchedAt < 2 * 60000) { toast(noNewerText()); return; }
+  const prevAsOf = bankAsOf();
   if (force === 'fix' && S.bank.fetchedAt && now - S.bank.fetchedAt < 60000) return;
   // (SimpleFIN allows about 24 a day; the sync storage's around-the-clock check uses some of them.)
   if (log.count >= 16) { S.bank.error = "Today's update limit is reached. It will update again tomorrow."; save(); render(); return; }
@@ -380,6 +381,8 @@ async function fetchBank(force) {
     const errs = (j.errlist || j.errors || []).map(e => typeof e === 'string' ? e : (e.msg || e.message || e.code || '')).filter(Boolean);
     S.bank.error = errs.length ? errs.join(' ') : null;
     S.bank.fetchedAt = now;
+    // Tapping "Update now" says plainly whether the bank actually sent anything newer.
+    if (force === true && !S.bank.error) toast(bankAsOf() && bankAsOf() === prevAsOf ? noNewerText() : `New balance from ${bankName()}${bankAsOf() ? ' (as of ' + whenText(bankAsOf()) + ')' : ''}.`);
   } catch (e) {
     S.bank.error = e.message || "Couldn't update from the bank.";
   }
@@ -404,6 +407,36 @@ function bankProblem() {
 }
 // True when the big "Available to spend" number can't be trusted right now.
 const notCurrent = () => { const p = bankProblem(); return !!(p && !p.freshHand); };
+
+/* SimpleFIN is a copy of the bank that it refreshes only now and then (about once a day), so even a working
+   connection can show a balance that is many hours old. The age is always shown under "Available to spend",
+   and after BEHIND a warning says to check the bank's own app before spending. */
+const BEHIND = 3 * HOUR;
+// When the balance "Available to spend" starts from was true: the one typed in, or the bank's.
+const balanceAt = () => { const m = manualBal(); return m ? m.at : bankAsOf(); };
+const whenAt = ms => whenText(ms).replace(/^(today|yesterday) /, '$1 at ');
+const noNewerText = () => `Checked just now. SimpleFIN hasn't received anything newer from ${bankName()} since ${whenAt(bankAsOf())}.`;
+function bankBehind() {
+  if (!S || !bankOn() || bankBusy || bankProblem()) return null;
+  const at = balanceAt();
+  return at && Date.now() - at > BEHIND ? at : null;
+}
+function balanceAgeHtml() {
+  if (!bankOn()) return '';
+  if (bankBusy) return `<div class="as-of">Updating from ${esc(bankName())}...</div>`;
+  const at = balanceAt(); if (!at) return '';
+  const who = manualBal() ? 'You entered this balance' : `${esc(capFirst(bankName()))}'s balance as of`;
+  return `<div class="as-of${bankBehind() ? ' old' : ''}">${who} ${whenAt(at)} (${timeAgo(at)}). Anything spent since then isn't included yet.</div>`;
+}
+function bankBehindHtml() {
+  const at = bankBehind(); if (!at) return '';
+  const bank = esc(bankName());
+  return `<div class="bank-behind">
+    <div class="bb-title">This balance is about ${timeAgo(at).replace(' ago', '')} old</div>
+    <p>${manualBal() ? 'You entered it' : `SimpleFIN last got it from ${bank}`} ${whenAt(at)}. Spending since then isn't counted, so the real amount may be lower. <b>Check ${bank}'s own app before spending.</b></p>
+    <div class="btns"><button class="btn" data-act="balances">Enter today's balance</button><button class="btn ghost" data-act="bankRefresh">Check the bank now</button></div>
+  </div>`;
+}
 function bankAlertHtml() {
   const p = bankProblem(); if (!p) return '';
   const bank = esc(bankName()), m = manualBal();
@@ -1078,10 +1111,12 @@ function viewHome() {
   const stale = !bal.updated ? 'Balance not entered yet' : diffDays(bal.updated, t) === 0 ? 'Balance updated today' : `Balance updated ${diffDays(bal.updated, t)} day${diffDays(bal.updated, t) === 1 ? '' : 's'} ago`;
   let h = `<h1>Bills</h1>
   ${bankAlertHtml()}
+  ${bankBehindHtml()}
   ${notCurrent() ? '' : statusHtml(c, nw)}
   <div class="card hero${notCurrent() ? ' not-current' : ''}">
     <div class="label">Available to spend ${c.hasPay ? `until payday, ${nice(c.np)}` : 'for the next 2 weeks'}${notCurrent() ? ' <span class="nc-tag">NOT CURRENT</span>' : ''}</div>
     <div class="big num ${c.safe < 0 ? 'neg' : ''}">${fm(c.safe)}</div>
+    ${balanceAgeHtml()}
     <details><summary>How this is worked out</summary>
     <div class="small muted" style="margin-top:6px">Checking minus the bills due before payday.${nw ? '' : ' Bills after payday are not included, so keep some back for next week.'}</div>
     ${bankOn()
