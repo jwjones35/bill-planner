@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's available to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '2.6.1';
+const APP_VERSION = '2.7.0';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -65,6 +65,9 @@ function normalize(s) {
   for (const k of ['incomes', 'bills', 'payments', 'receipts', 'setAsides', 'infos', 'spending']) if (!Array.isArray(out[k])) out[k] = [];
   for (const k of ['incomes', 'bills', 'setAsides', 'infos', 'spending']) out[k].forEach(x => { if (!x.id) x.id = uid(); });
   out.bank = Object.assign({ accounts: [], tx: [], ignore: [], suggest: [], autoLog: [] }, out.bank || {});
+  // Before 2.7.0 any failed check (no internet, a busy SimpleFIN) was saved as a broken connection. Forget those;
+  // the next check finds out whether there's a real problem.
+  if (out.bank.error && !out.bank.errorKind) out.bank.error = null;
   return out;
 }
 function load() {
@@ -350,42 +353,115 @@ async function claimToken(token) {
   return access;
 }
 
-// Fetch balances and the last ~5 weeks of transactions. At most about once an hour (SimpleFIN allows ~24 a day).
+/* How often to ask SimpleFIN. SimpleFIN allows about 24 checks a day per key, warns when an app goes over, and
+   then turns the key off (which is what forces a full reconnect). Its bank data only changes about once a day, so:
+   - the phones share one automatic check every 3 hours (S.bank.fetchedAt is shared between phones);
+   - each phone makes at most 8 checks a day, counted on this phone only (BANK_TRY_KEY);
+   - the sync storage's around-the-clock check uses at most 8 more (every 6 hours, every 3 while broken);
+   - after a failed try, the next automatic one waits longer each time (15 min, 30 min, 1 hour, then 2 hours);
+   - if SimpleFIN says the app is checking too often, automatic checks stop for 12 hours. */
+const BANK_EVERY = 3 * HOUR, BANK_DAY_MAX = 8;
+const BANK_TRY_KEY = 'billplanner.bankTries'; // { day, count, last, fails, slowUntil }
+function bankTries() {
+  let t = null; try { t = JSON.parse(localStorage.getItem(BANK_TRY_KEY) || 'null'); } catch (e) { }
+  t = t || {};
+  return { day: today(), count: t.day === today() ? t.count || 0 : 0, last: t.last || 0, fails: t.fails || 0, slowUntil: t.slowUntil || 0 };
+}
+function setBankTries(t) { try { localStorage.setItem(BANK_TRY_KEY, JSON.stringify(t)); } catch (e) { } }
+
+/* What a SimpleFIN error means. Only these need the user:
+   'signin'  - the bank wants a new sign-in on SimpleFIN (SimpleFIN code con.auth). Banks do this now and then.
+   'revoked' - SimpleFIN no longer accepts this app's key (HTTP 403 or gen.auth): a new setup token is needed.
+   'payment' - the SimpleFIN subscription needs paying (HTTP 402).
+   Everything else ('temp': account temporarily unavailable, missing data, warnings) is retried quietly.
+   'quota' is SimpleFIN saying the app checks too often. */
+const SIGNIN_WORDS = /auth|sign.?in|log.?in|credential|password|mfa|reconnect|re-?link|expired/i;
+const QUOTA_WORDS = /too many|quota|rate.?limit|request limit|limit (is |was |has been )?(reached|exceeded)|per day/i;
+function bankErrKind(e) {
+  const code = String(e.code || ''), msg = String(e.msg || e.message || '');
+  if (QUOTA_WORDS.test(msg)) return 'quota';
+  if (/^con\.auth/.test(code)) return 'signin';
+  if (/^gen\.auth/.test(code)) return 'revoked';
+  if (code) return 'temp';
+  return SIGNIN_WORDS.test(msg) ? 'signin' : 'temp';
+}
+const BANK_ERR_TEXT = {
+  signin: bank => `${capFirst(bank)} wants you to sign in again on SimpleFIN's website. Banks ask for this now and then for safety, and the app can't do it for you.`,
+  revoked: () => "SimpleFIN no longer accepts this app's access key. That happens if the app was removed on SimpleFIN's website, or if the key was turned off. A new setup token from SimpleFIN fixes it.",
+  payment: () => 'SimpleFIN says the subscription needs paying. Once it is paid, the connection works again by itself.'
+};
+function setBankError(kind, simplefinSays) {
+  S.bank.errorKind = kind;
+  S.bank.error = BANK_ERR_TEXT[kind](bankName());
+  S.bank.errorSays = simplefinSays || '';
+}
+function clearBankError() { S.bank.error = null; S.bank.errorKind = null; S.bank.errorSays = ''; }
+
+// Fetch balances and the last ~5 weeks of transactions.
+// force: false = automatic, true = "Update now" (tells the user what happened), 'fix' = checking after a fix.
 async function fetchBank(force) {
   const acc = bankAccess();
   if (!acc || !S || bankBusy) return;
-  const now = Date.now();
-  let log = S.bank.fetchLog || {};
-  if (log.day !== today()) log = { day: today(), count: 0 };
-  if (!force && S.bank.fetchedAt && now - S.bank.fetchedAt < HOUR) return;
-  if (force === true && S.bank.fetchedAt && now - S.bank.fetchedAt < 2 * 60000) { toast(noNewerText()); return; }
+  const now = Date.now(), t = bankTries();
+  const lastOk = S.bank.fetchedAt || 0;
+  if (!force) {
+    if (now - lastOk < BANK_EVERY) return;
+    if (now < t.slowUntil) return;
+    if (t.fails && now - t.last < Math.min(15 * 60000 * 2 ** (t.fails - 1), 2 * HOUR)) return;
+  } else if (now - Math.max(lastOk, t.last) < 2 * 60000) {
+    if (force === true) toast(lastOk >= t.last ? noNewerText() : 'The app checked SimpleFIN a moment ago. Try again in 2 minutes.');
+    return;
+  }
+  if (t.count >= BANK_DAY_MAX) {
+    if (force === true) toast(`The app has checked SimpleFIN ${t.count} times today, the most it does in one day so SimpleFIN keeps the connection on. SimpleFIN only gets new numbers from ${bankName()} about once a day, so nothing is missed. It checks again tomorrow.`);
+    return;
+  }
   const prevAsOf = bankAsOf();
-  if (force === 'fix' && S.bank.fetchedAt && now - S.bank.fetchedAt < 60000) return;
-  // (SimpleFIN allows about 24 a day; the sync storage's around-the-clock check uses some of them.)
-  if (log.count >= 16) { S.bank.error = "Today's update limit is reached. It will update again tomorrow."; save(); render(); return; }
+  t.count++; t.last = now; setBankTries(t);
   bankBusy = true; render();
+  let temp = null; // a temporary problem: retried by itself later, never shown as a broken connection
   try {
     const u = new URL(acc);
     const auth = 'Basic ' + btoa(decodeURIComponent(u.username) + ':' + decodeURIComponent(u.password));
     const base = u.origin + u.pathname.replace(/\/$/, '');
     const start = Math.floor((now - 35 * DAY) / 1000);
-    log.count++; S.bank.fetchLog = log;
-    let r;
+    let r = null;
     try { r = await fetch(`${base}/accounts?version=2&pending=1&start-date=${start}`, { headers: { Authorization: auth } }); }
-    catch (e) { throw new Error("Couldn't reach SimpleFIN. Check the internet connection."); }
-    if (r.status === 403) throw new Error('SimpleFIN refused the connection. It may have been turned off; reconnect under More.');
-    if (r.status === 402) throw new Error('SimpleFIN says the subscription needs payment.');
-    if (!r.ok) throw new Error('SimpleFIN answered with error ' + r.status + '.');
-    const j = await r.json();
-    applyBank(j, now);
-    const errs = (j.errlist || j.errors || []).map(e => typeof e === 'string' ? e : (e.msg || e.message || e.code || '')).filter(Boolean);
-    S.bank.error = errs.length ? errs.join(' ') : null;
-    S.bank.fetchedAt = now;
-    // Tapping "Update now" says plainly whether the bank actually sent anything newer.
-    if (force === true && !S.bank.error) toast(bankAsOf() && bankAsOf() === prevAsOf ? noNewerText() : `New balance from ${bankName()}${bankAsOf() ? ' (as of ' + whenText(bankAsOf()) + ')' : ''}.`);
+    catch (e) { temp = "Couldn't reach SimpleFIN (no internet right then, or SimpleFIN didn't answer)."; }
+    if (r && r.status === 403) { setBankError('revoked', 'Authentication failed (error 403).'); t.fails++; }
+    else if (r && r.status === 402) { setBankError('payment', 'Payment required (error 402).'); t.fails++; }
+    else if (r && r.status === 429) { temp = 'SimpleFIN asked the app to check less often.'; t.slowUntil = now + 12 * HOUR; }
+    else if (r && !r.ok) temp = `SimpleFIN had a problem on its side (error ${r.status}).`;
+    else if (r) {
+      let j = null;
+      try { j = await r.json(); } catch (e) { temp = "SimpleFIN's answer arrived incomplete."; }
+      if (j) {
+        applyBank(j, now);
+        S.bank.fetchedAt = now;
+        const errs = [...(Array.isArray(j.errlist) ? j.errlist : []), ...(Array.isArray(j.errors) ? j.errors : [])]
+          .map(e => (typeof e === 'string' ? { msg: e } : e || {}))
+          .map(e => ({ kind: bankErrKind(e), msg: String(e.msg || e.message || e.code || '') }));
+        const bad = errs.find(e => e.kind === 'revoked') || errs.find(e => e.kind === 'signin');
+        if (errs.some(e => e.kind === 'quota')) t.slowUntil = now + 12 * HOUR;
+        if (bad) setBankError(bad.kind, bad.msg); else clearBankError();
+        // Other messages from SimpleFIN are shown quietly under More (they usually clear up by themselves).
+        const notes = [...new Set(errs.filter(e => e !== bad && e.msg).map(e => e.msg))];
+        S.bank.note = notes.length ? notes.join(' ') : null;
+        S.bank.hiccup = null;
+        t.fails = bad ? t.fails + 1 : 0;
+        // Tapping "Update now" says plainly whether the bank actually sent anything newer.
+        if (force === true && !bad) toast(bankAsOf() && bankAsOf() === prevAsOf ? noNewerText() : `New balance from ${bankName()}${bankAsOf() ? ' (as of ' + whenText(bankAsOf()) + ')' : ''}.`);
+      }
+    }
   } catch (e) {
-    S.bank.error = e.message || "Couldn't update from the bank.";
+    temp = temp || "Couldn't read the bank's answer.";
   }
+  if (temp) {
+    t.fails++;
+    S.bank.hiccup = { msg: temp, at: now };
+    if (force === true) toast(`${temp} The app tries again by itself. Nothing for you to do.`);
+  }
+  setBankTries(t);
   bankBusy = false;
   save(); render();
 }
@@ -424,7 +500,7 @@ async function fetchLive(force) {
   if (!S || !bankOn() || !syncLinked() || !liveOn() || liveBusy) return false;
   const m = S.bank.manual;
   if (!force && isLive(m) && Date.now() - m.at < LIVE_EVERY) { fetchLiveTx(false).then(ok => { if (ok) render(); }).catch(() => { }); return true; }
-  liveBusy = true;
+  liveBusy = true; render();
   const r = await liveCall('POST', { step: 'balance' });
   liveBusy = false;
   const j = r.j || {};
@@ -547,10 +623,12 @@ const SIMPLEFIN_URL = 'https://bridge.simplefin.org/';
 function bankProblem() {
   if (!S || !bankOn()) return null;
   const m = manualBal(), freshHand = !!(m && Date.now() - m.at < 12 * HOUR);
-  if (S.bank.error) return { kind: 'error', msg: S.bank.error, freshHand };
+  // live: the balance still comes straight from the bank (Plaid), so only the spending list is waiting.
+  const live = freshHand && isLive(m);
+  if (S.bank.error) return { kind: 'error', why: S.bank.errorKind || 'signin', msg: S.bank.error, says: S.bank.errorSays || '', freshHand, live };
   // The around-the-clock check on the sync storage found it broken before this phone did.
   // (Unless this phone has heard from the bank without a problem since then.)
-  if (bankWatchInfo && bankWatchInfo.state === 'broken' && !((S.bank.fetchedAt || 0) > (bankWatchInfo.changed || 0))) return { kind: 'error', msg: 'The connection needs a new sign-in.', freshHand };
+  if (bankWatchInfo && bankWatchInfo.state === 'broken' && !((S.bank.fetchedAt || 0) > (bankWatchInfo.changed || 0))) return { kind: 'error', why: 'signin', msg: BANK_ERR_TEXT.signin(bankName()), says: '', freshHand, live };
   const asOf = bankAsOf();
   if (asOf && Date.now() - asOf > 36 * HOUR && !freshHand) return { kind: 'old', asOf, freshHand };
   return null;
@@ -566,15 +644,31 @@ const BEHIND = 3 * HOUR;
 const balanceAt = () => { const m = manualBal(); return m ? m.at : bankAsOf(); };
 const whenAt = ms => whenText(ms).replace(/^(today|yesterday) /, '$1 at ');
 const noNewerText = () => `Checked just now. SimpleFIN hasn't received anything newer from ${bankName()} since ${whenAt(bankAsOf())}.`;
+/* Right after the app opens, the saved balance may be hours old while a fresh one is on its way. Until it
+   arrives (or 20 seconds pass), "Available to spend" says "Updating..." instead of showing the old number as if
+   it were current. */
+let balRefreshing = false;
+const balUpdating = () => !!(S && bankOn() && (balRefreshing || liveBusy || (bankBusy && !isLive(manualBal()))));
+function startBalRefresh() {
+  if (!S || !bankOn()) return;
+  const at = balanceAt() || 0;
+  const liveDue = isLive(S.bank.manual) && Date.now() - at > LIVE_EVERY;
+  const sfDue = !isLive(manualBal()) && Date.now() - (S.bank.fetchedAt || 0) > BANK_EVERY;
+  if (!liveDue && !sfDue) return;
+  balRefreshing = true; render();
+  setTimeout(() => { if (balRefreshing) { balRefreshing = false; render(); } }, 20000);
+}
+function endBalRefresh() { if (balRefreshing) { balRefreshing = false; render(); } }
 function bankBehind() {
-  if (!S || !bankOn() || bankBusy || bankProblem()) return null;
+  if (!S || !bankOn() || bankBusy || balUpdating() || bankProblem()) return null;
   const at = balanceAt();
   return at && Date.now() - at > BEHIND ? at : null;
 }
 function balanceAgeHtml() {
   if (!bankOn()) return '';
-  if (bankBusy) return `<div class="as-of">Updating from ${esc(bankName())}...</div>`;
-  const at = balanceAt(); if (!at) return '';
+  const at = balanceAt();
+  if (balUpdating()) return `<div class="as-of">Getting today's balance from ${esc(bankName())}...${at ? ` The last balance was ${fm(manualBal() ? manualBal().amount : S.bank.bal.checking)}, from ${whenAt(at)}.` : ''}</div>`;
+  if (!at) return '';
   const who = isLive(manualBal()) ? `${esc(capFirst(bankName()))}'s live balance as of` : manualBal() ? 'You entered this balance' : `${esc(capFirst(bankName()))}'s balance as of`;
   return `<div class="as-of${bankBehind() ? ' old' : ''}">${who} ${whenAt(at)} (${timeAgo(at)}). Anything spent since then isn't included yet.</div>`;
 }
@@ -591,13 +685,20 @@ function bankBehindHtml() {
 function bankAlertHtml() {
   const p = bankProblem(); if (!p) return '';
   const bank = esc(bankName()), m = manualBal();
-  const title = p.kind === 'error' ? `Your connection to ${bank} stopped working` : `${capFirst(bank)} hasn't sent new information since ${whenText(p.asOf)}`;
-  const now = p.freshHand
+  const title = p.kind !== 'error' ? `${capFirst(bank)} hasn't sent new information since ${whenText(p.asOf)}`
+    : p.why === 'revoked' ? 'SimpleFIN needs a new setup token'
+    : p.why === 'payment' ? 'SimpleFIN needs its subscription paid'
+    : `SimpleFIN needs you to sign in to ${bank} again`;
+  const now = p.live
+    ? `<p>Your balance is still live from ${bank}, so "Available to spend" is right. Only new purchases in the spending list are waiting until this is fixed.</p>`
+    : p.freshHand
     ? `<p>"Available to spend" is using ${isLive(m) ? `the live balance from ${bank}` : 'the balance you entered'} (${whenText(m.at)}), so it's right for now. Anything spent after that isn't counted until the connection works again.</p>`
     : `<p><b>"Available to spend" below is NOT current.</b> Check your balance in ${bank}'s own app before spending anything.</p>`;
-  const why = p.kind === 'error' ? `<p class="small">SimpleFIN says: "${esc(p.msg)}"</p>` : '';
+  const why = p.kind === 'error' ? `<p class="small">${esc(p.msg)}${p.says ? ` (SimpleFIN says: "${esc(p.says)}")` : ''}</p>` : '';
   const btns = p.kind === 'error'
-    ? (S.bank.fixAt
+    ? (p.why === 'revoked'
+      ? `<button class="btn" data-act="bankFix">Show me how</button><button class="btn ghost" data-act="bankConnect">Paste the new token</button>`
+      : S.bank.fixAt
       ? `<button class="btn" data-act="bankFixCheck">I'm done on SimpleFIN: check now</button><button class="btn ghost" data-act="bankFix">Show the steps again</button>`
       : `<button class="btn" data-act="bankFix">Fix the connection</button>`)
     : `<button class="btn" data-act="bankRefresh">Check the bank now</button>`;
@@ -614,6 +715,8 @@ function bankMustAck() {
   if (!S) return false;
   const p = bankProblem();
   if (!p || p.kind !== 'error') { lsSetNum(ACK_SEEN, null); return false; }
+  // The balance is still live from the bank: the red banner on Home is enough, no pop-up.
+  if (p.live) return false;
   let seen = lsNum(ACK_SEEN);
   if (!seen) { // first time this phone sees this problem (a notification tapped just before counts)
     seen = Date.now(); const a = lsNum(ACK_AT); if (a && seen - a < 15 * 60000) seen = a;
@@ -639,7 +742,25 @@ function bankAcknowledge() {
 }
 // Step 1: reconnect on SimpleFIN's website.
 function sheetBankFix() {
-  const bank = esc(bankName());
+  const bank = esc(bankName()), p = bankProblem();
+  if (p && p.why === 'revoked') {
+    // The key itself is gone: a new setup token, pasted here. Bills, names and matches are all kept.
+    openSheet(`<h3>Get a new setup token</h3>
+      <p>SimpleFIN no longer accepts this app's key, so the app needs a new one. Your bills, names and settings stay as they are.</p>
+      <ol style="padding-left:22px">
+        <li>Tap <b>Open SimpleFIN</b> and sign in.</li>
+        <li>Make a <b>setup token for a new app</b> and copy it. SimpleFIN's own screens show how.</li>
+        <li>Come back here and tap <b>Paste the new token</b>.</li></ol>
+      <div class="btns"><button class="btn block" data-act="bankFixGo">Open SimpleFIN</button></div>
+      <div class="btns"><button class="btn ghost block" data-act="bankConnect">Paste the new token</button></div>`);
+    return;
+  }
+  if (p && p.why === 'payment') {
+    openSheet(`<h3>Pay the SimpleFIN subscription</h3>
+      <p>Tap <b>Open SimpleFIN</b>, sign in, and pay the subscription there. Then come back to this app: it checks the connection by itself.</p>
+      <div class="btns"><button class="btn block" data-act="bankFixGo">Open SimpleFIN</button></div>`);
+    return;
+  }
   openSheet(`<h3>Fix the bank connection</h3><p class="small muted" style="margin-top:0">Step 1 of 2</p>
     <p>Tap <b>Open SimpleFIN</b> and sign in. Next to <b>${bank}</b>, tap <b>Adjust</b> and follow its steps. ${bank} may text you a code to type in.</p>
     <p>When SimpleFIN shows <b>OK</b> next to ${bank}, come back to this app. It checks the connection by itself.</p>
@@ -657,7 +778,7 @@ async function bankFixCheck(manual) {
   if (manual) {
     const bank = esc(bankName());
     openSheet(`<h3>Not working yet</h3><p class="small muted" style="margin-top:0">Step 2 of 2</p>
-      <p>SimpleFIN still says: "${esc(S.bank.error)}"</p>
+      <p>${esc(S.bank.error)}${S.bank.errorSays ? ` <span class="small">(SimpleFIN says: "${esc(S.bank.errorSays)}")</span>` : ''}</p>
       <p>Right after reconnecting, this message often stays for a few minutes while SimpleFIN checks ${bank} again. Wait 5 minutes, then tap <b>Check again</b>.</p>
       <p class="small">If SimpleFIN doesn't show <b>OK</b> next to ${bank}, go back to step 1.</p>
       <div class="btns"><button class="btn ghost" data-act="bankFix">Back to step 1</button><button class="btn" data-act="bankFixCheck">Check again</button></div>`);
@@ -1263,10 +1384,10 @@ function viewHome() {
   let h = `<h1>Bills</h1>
   ${bankAlertHtml()}
   ${bankBehindHtml()}
-  ${notCurrent() ? '' : statusHtml(c, nw)}
-  <div class="card hero${notCurrent() ? ' not-current' : ''}">
+  ${notCurrent() || balUpdating() ? '' : statusHtml(c, nw)}
+  <div class="card hero${notCurrent() ? ' not-current' : ''}${balUpdating() ? ' updating' : ''}">
     <div class="label">Available to spend ${c.hasPay ? `until payday, ${nice(c.np)}` : 'for the next 2 weeks'}${notCurrent() ? ' <span class="nc-tag">NOT CURRENT</span>' : ''}</div>
-    <div class="big num ${c.safe < 0 ? 'neg' : ''}">${fm(c.safe)}</div>
+    ${balUpdating() ? `<div class="big updating-text">Updating...</div>` : `<div class="big num ${c.safe < 0 ? 'neg' : ''}">${fm(c.safe)}</div>`}
     ${balanceAgeHtml()}
     <details><summary>How this is worked out</summary>
     <div class="small muted" style="margin-top:6px">Checking minus the bills due before payday.${nw ? '' : ' Bills after payday are not included, so keep some back for next week.'}</div>
@@ -1494,7 +1615,9 @@ function viewMore() {
   <h2>About</h2><div class="card"><button class="row" data-act="whatsNew"><span class="main"><div class="name">What's new</div><div class="sub">Version ${APP_VERSION} · see what changed in each update</div></span></button></div>
   <h2>Bank connection</h2><div class="card">${bankAccess()
     ? `<div class="pad"><div><b>${bankOn() ? `Connected to ${esc(bankName())}` : 'Connected, waiting for the first update'}</b></div>
-        <div class="small muted">${bankBusy ? 'Updating now...' : S.bank.fetchedAt ? `${S.bank.bal ? bankAgeText() + '. ' : ''}SimpleFIN gets new data from the bank about once a day; the app checks for it every hour while open (last checked ${timeAgo(S.bank.fetchedAt)}).` : 'Not updated yet.'}</div>
+        <div class="small muted">${bankBusy ? 'Updating now...' : S.bank.fetchedAt ? `${S.bank.bal ? bankAgeText() + '. ' : ''}SimpleFIN gets new data from the bank about once a day; the app checks for it every 3 hours while open (last checked ${timeAgo(S.bank.fetchedAt)}).` : 'Not updated yet.'}</div>
+        ${!S.bank.error && S.bank.hiccup ? `<div class="small muted" style="margin-top:4px">The last try (${timeAgo(S.bank.hiccup.at)}) didn't go through: ${esc(S.bank.hiccup.msg)} The connection is still fine. The app tries again by itself; nothing for you to do.</div>` : ''}
+        ${!S.bank.error && S.bank.note ? `<div class="small muted" style="margin-top:4px">A note from SimpleFIN: "${esc(S.bank.note)}" These usually clear up by themselves.</div>` : ''}
         ${bankWatchInfo && bankWatchInfo.on ? `<div class="small muted" style="margin-top:4px">Also checked around the clock by your sync storage, even with the app closed${bankWatchInfo.checked ? ` (last check ${timeAgo(bankWatchInfo.checked)})` : ' (first check within 15 minutes)'}. If the connection breaks, every phone gets a notification.</div>` : ''}
         ${S.bank.error ? `<div class="small neg" style="margin-top:4px">${esc(S.bank.error)}</div>` : ''}
         <div class="btns"><button class="btn small" data-act="bankRefresh">Update now</button><button class="btn small ghost" data-act="bankAccounts">Choose accounts</button></div>
@@ -2108,7 +2231,14 @@ document.addEventListener('click', e => {
       }
       break;
     case 'bankFix': sheetBankFix(); break;
-    case 'bankFixGo': S.bank.fixAt = Date.now(); save(); window.open(SIMPLEFIN_URL, '_blank', 'noopener'); closeSheet(); render(); break;
+    case 'bankFixGo': {
+      // A new setup token gets pasted back in this sheet, so it stays open and there's nothing to re-check.
+      const revoked = (bankProblem() || {}).why === 'revoked';
+      if (!revoked) S.bank.fixAt = Date.now();
+      save(); window.open(SIMPLEFIN_URL, '_blank', 'noopener');
+      if (!revoked) closeSheet();
+      render(); break;
+    }
     case 'bankFixCheck': bankFixCheck(true); break;
     case 'bankAckFix': bankAcknowledge(); sheetBankFix(); break;
     case 'bankAckLater': bankAcknowledge(); render(); toast('OK. The red warning stays on Home until the connection is fixed.'); break;
@@ -2398,11 +2528,15 @@ document.addEventListener('submit', e => {
       // Backup method: an already-claimed SimpleFIN access URL can be pasted instead of a setup token.
       const direct = /^https:\/\/[^:@\/\s]+:[^@\/\s]+@\S+$/.test(token);
       (direct ? Promise.resolve(token) : claimToken(token)).then(async access => {
+        // Same bank again (a new token after the old one stopped working): keep everything learned so far.
+        const again = !!(S.bank.accounts && S.bank.accounts.length);
         setBankAccess(access);
-        S.bank = { accounts: [], tx: [], ignore: S.bank.ignore || [], suggest: [], autoLog: [] };
+        if (again) { clearBankError(); S.bank.fetchedAt = 0; S.bank.fixAt = null; S.bank.hiccup = null; setBankTries({ ...bankTries(), fails: 0, slowUntil: 0 }); }
+        else S.bank = { accounts: [], tx: [], ignore: S.bank.ignore || [], suggest: [], autoLog: [] };
         save(); closeSheet();
         await fetchBank(false);
         if (S.bank.error && !S.bank.accounts.length) { toast(S.bank.error); return; }
+        if (S.bank.hiccup && !S.bank.accounts.length) { toast(`Connected. ${S.bank.hiccup.msg} The app tries again by itself in a few minutes.`); return; }
         toast(`Connected to ${bankName()}.`);
         if (S.bank.accounts.length > 1) sheetAccounts();
       }).catch(e => { btn.disabled = false; btn.textContent = 'Connect'; toast(e.message); });
@@ -2491,12 +2625,15 @@ document.addEventListener('focusin', e => {
 // Re-draw when the app comes back to the front (the date may have changed).
 // When sharing with another phone, bring in its changes first, then check the bank.
 async function refreshAll() {
-  if (syncLinked()) await syncNow();
-  // Back from fixing the connection on SimpleFIN: check it right away.
+  startBalRefresh(); // "Updating..." instead of an old number until the fresh balance arrives
+  try { if (syncLinked()) await syncNow(); } catch (e) { }
+  // The live balance straight from the bank first (when it's connected through Plaid): it's the one shown.
+  if (S && syncLinked()) { try { await liveStatus(); await fetchLive(false); } catch (e) { } }
+  if (S && isLive(manualBal())) endBalRefresh();
+  // Back from fixing the connection on SimpleFIN: check it right away. Otherwise SimpleFIN (transactions).
   if (S && S.bank.fixAt) await bankFixCheck(false); else await fetchBank(false);
+  endBalRefresh();
   if (!S) return;
-  // The live balance straight from the bank, when it's connected through Plaid.
-  if (syncLinked()) { try { await liveStatus(); await fetchLive(false); } catch (e) { } }
   // Make sure every gas-station purchase already in the bank data has its record (also right after an update).
   if (spendScan()) save();
   // Spending watch: send any questions and alerts that are due, and show this phone's own question.

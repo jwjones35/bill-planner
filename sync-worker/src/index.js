@@ -100,10 +100,13 @@ async function sendDue(env) {
    Every 4 hours (every 2 while broken) the storage asks SimpleFIN for balances only, with the household's read-only
    key. It keeps no balances or transactions, only whether the connection works. When it breaks, every phone gets
    the "sign in again" notification; when it works again, the "working again" one. Both were encrypted by the phones.
-   SimpleFIN allows about 24 requests a day per key; this uses at most 12, and the phones' own checks are shared. */
-const BW_OK_EVERY = 4 * 3600000, BW_BROKEN_EVERY = 2 * 3600000;
-// Errors that clearly mean someone has to sign in again (anything else must happen twice in a row).
-const BW_SIGNIN = /auth|attention|sign.?in|log.?in|credential|password|mfa|verif|reconnect|expired/i;
+   SimpleFIN allows about 24 requests a day per key and turns the key off if an app keeps going over, so this
+   uses at most 4 a day (8 while broken) and each phone at most 8. Only a real sign-in problem counts as broken:
+   no answer, a busy SimpleFIN (429, 5xx) or a temporary account message changes nothing. */
+const BW_OK_EVERY = 6 * 3600000, BW_BROKEN_EVERY = 3 * 3600000;
+// Older SimpleFIN answers have plain-text errors without a code: these words mean someone has to sign in again.
+const BW_SIGNIN = /auth|sign.?in|log.?in|credential|password|mfa|reconnect|re-?link|expired/i;
+const BW_QUOTA = /too many|quota|rate.?limit|request limit|limit (is |was |has been )?(reached|exceeded)|per day/i;
 // Only SimpleFIN's own addresses (and, on the developer's PC, a pretend SimpleFIN for testing).
 function bwHostOk(env, u) {
   try { const x = new URL(u); return (x.protocol === 'https:' && /(^|\.)simplefin\.org$/.test(x.hostname)) || (!!env.BW_TEST_HOST && x.hostname === env.BW_TEST_HOST); } catch (e) { return false; }
@@ -119,9 +122,17 @@ async function bwCheck(env, access) {
   if (r.status === 403 || r.status === 402) return { state: 'broken', sure: true };
   if (!r.ok) return null;
   let j; try { j = await r.json(); } catch (e) { return null; }
-  const errs = (j.errlist || j.errors || []).map(e => typeof e === 'string' ? e : (e && (e.msg || e.message || e.code)) || '').filter(Boolean);
+  const errs = [...(Array.isArray(j.errlist) ? j.errlist : []), ...(Array.isArray(j.errors) ? j.errors : [])]
+    .map(e => (typeof e === 'string' ? { msg: e } : e || {}));
   if (!errs.length) return { state: 'ok' };
-  return { state: 'broken', sure: errs.some(e => BW_SIGNIN.test(e)) };
+  // SimpleFIN codes: con.auth = the bank wants a new sign-in, gen.auth = the key isn't accepted.
+  const signin = errs.some(e => {
+    const code = String(e.code || ''), msg = String(e.msg || e.message || '');
+    if (BW_QUOTA.test(msg)) return false;
+    return code ? /^(con|gen)\.auth/.test(code) : BW_SIGNIN.test(msg);
+  });
+  // Anything else (account temporarily unavailable, missing data, a warning) is not a broken connection.
+  return signin ? { state: 'broken', sure: true } : null;
 }
 async function bwRun(env, onlyId) {
   const now = Date.now();
@@ -129,7 +140,7 @@ async function bwRun(env, onlyId) {
     ? [await env.DB.prepare('SELECT * FROM bankwatch WHERE household = ?').bind(onlyId).first()].filter(Boolean)
     : (await env.DB.prepare('SELECT * FROM bankwatch').all()).results || [];
   for (const w of rows) {
-    if (!env.BW_TEST_HOST && now - w.checked < (onlyId ? 120000 : (w.state === 'broken' ? BW_BROKEN_EVERY : BW_OK_EVERY) - 60000)) continue;
+    if (!env.BW_TEST_HOST && now - w.checked < (onlyId ? 10 * 60000 : (w.state === 'broken' ? BW_BROKEN_EVERY : BW_OK_EVERY) - 60000)) continue;
     const c = await bwCheck(env, w.access);
     if (!c) { await env.DB.prepare('UPDATE bankwatch SET checked = ? WHERE household = ?').bind(now, w.household).run(); continue; }
     let state = w.state, strikes = 0;
@@ -149,12 +160,14 @@ async function bwRun(env, onlyId) {
   }
 }
 // While broken: every hour, send "sign in again" again to each phone that hasn't acknowledged it.
-// Not between 10 PM and 7 AM at home (the first alert goes out at any hour).
+// Not between 10 PM and 7 AM at home (the first alert goes out at any hour). No repeats when the household also
+// has the live balance (Plaid): then "Available to spend" is still right, only new purchases wait.
 const BW_NAG_EVERY = 3600000;
 async function bwNag(env) {
   const now = Date.now();
   const rows = (await env.DB.prepare("SELECT household, broken, acked, nagged, tz FROM bankwatch WHERE state = 'broken'").all()).results || [];
   for (const w of rows) {
+    if (await env.DB.prepare('SELECT 1 FROM plaid WHERE household = ?').bind(w.household).first()) continue;
     if (!env.BW_TEST_HOST && now - w.nagged < BW_NAG_EVERY - 60000) continue;
     const hour = new Date(now - (w.tz || 0) * 60000).getUTCHours();
     if (!env.BW_TEST_HOST && (hour < 7 || hour >= 22)) continue;

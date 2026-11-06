@@ -394,6 +394,10 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
 .bank-alert .btn { background: #fff !important; color: var(--bad); font-weight: 800; }
 .bank-alert .btn.ghost { background: rgba(255,255,255,.18) !important; color: #fff; }
 .hero.not-current .big { opacity: .45; text-decoration: line-through; text-decoration-thickness: 3px; }
+/* While a fresh balance is on its way: a word, not an old number. */
+.hero .big.updating-text { font-size: 34px; color: var(--muted); text-decoration: none; opacity: 1; animation: bp-pulse 1.6s ease-in-out infinite; }
+@keyframes bp-pulse { 50% { opacity: .55; } }
+@media (prefers-reduced-motion: reduce) { .hero .big.updating-text { animation: none; } }
 /* How old the balance is, always under "Available to spend"; a warning card once it's hours old */
 .hero .as-of { font-size: 14px; font-weight: 600; margin-top: 2px; color: var(--muted); }
 .hero .as-of.old { color: var(--warn); font-weight: 800; }

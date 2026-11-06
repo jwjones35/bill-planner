@@ -4,6 +4,15 @@
    Every release adds an entry here, in plain words: added, changed, fixed, removed. */
 const CHANGELOG = [
   {
+    v: '2.7.0', date: '2026-11-05',
+    fixed: [
+      'The app kept saying the bank was disconnected when it wasn\'t. Any small hiccup (a moment without internet, SimpleFIN being busy) was treated as a broken connection. Now those are retried quietly by the app, and you only get asked to fix something when SimpleFIN really needs you: to sign in to the bank again, a new setup token, or a payment. Each one says plainly what happened and what to do.',
+      'The app now checks SimpleFIN less often (every 3 hours, shared by both phones). SimpleFIN only gets new numbers from the bank about once a day, and it turns an app\'s key off if the app checks too often. That would force a full reconnect.',
+      'When you open the app, "Available to spend" says "Updating..." until today\'s balance arrives, instead of showing an old number for a moment.',
+      'When the live balance is working, a SimpleFIN sign-in problem no longer blocks the screen or sends hourly reminders, because your balance is still right.'
+    ]
+  },
+  {
     v: '2.6.1', date: '2026-11-02',
     fixed: ['"Just in" purchases didn\'t show, because Plaid only updated its list of purchases now and then (it was 3 days behind). The app now asks Plaid to check the bank for new purchases (at most every 15 minutes), and checks for them every 2 minutes while it\'s open.']
   },
