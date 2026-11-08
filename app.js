@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's available to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '2.8.0';
+const APP_VERSION = '2.8.1';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -1734,6 +1734,10 @@ function sheetBill(b, draft) {
     <h3>${b ? 'Edit bill' : 'New bill'}</h3>
     <label for="bName">Name you see in the app</label><input id="bName" name="name" value="${esc(x.name || '')}" placeholder="For example: Water / sewer / trash" required>
     ${freqFields(x, 'b', true)}
+    <label for="bStart">First payment</label><input id="bStart" name="start" type="date" value="${b && b.since && b.since > today() ? b.since : ''}">
+    <p class="hint">Only for a bill that hasn't started yet, like a new payment plan. Nothing is counted before this date. Leave empty if it's already being paid.</p>
+    <label for="bEnd">Last payment</label><input id="bEnd" name="end" type="date" value="${x.endDate || ''}">
+    <p class="hint">For a bill that stops, like a 12-month payment plan. Nothing is counted after this date. Leave empty if it keeps going.</p>
     <label for="bAmt">Usual amount</label><input id="bAmt" name="amount" inputmode="decimal" value="${money2(x.amount)}" placeholder="Leave empty if you don't know yet">
     <label for="bFee">Transaction fee charged with it</label><input id="bFee" name="fee" inputmode="decimal" value="${money2(x.fee)}" placeholder="Optional, for example 2.25">
     <p class="hint">A small extra charge that comes with this bill on the same day. It's added to the bill's total.</p>
@@ -2261,6 +2265,10 @@ document.addEventListener('submit', e => {
       }
       const match = String(fd.get('match') || '').split(',').map(normText).filter(Boolean);
       const o = Object.assign({ name: fd.get('name').trim(), amount: num(fd.get('amount')), fee: num(fd.get('fee')) || 0, match, varies: fd.get('varies') === 'on', autopay: fd.get('autopay') === 'on', fun: fd.get('fun') === 'on', active: fd.get('active') === 'on', note: fd.get('note').trim() }, fr);
+      // First payment / last payment: a bill that starts later (counted from "since") or stops (endDate).
+      const start = fd.get('start') || null;
+      o.endDate = fd.get('end') || null;
+      if (start && o.endDate && o.endDate < start) { formError(f, 'The last payment is before the first payment. Check the two dates.', 'end'); return; }
       let bill;
       const tx = f.dataset.tx && S.bank.tx.find(t => t.id === f.dataset.tx);
       if (id) {
@@ -2271,10 +2279,12 @@ document.addEventListener('submit', e => {
           o.prev = { freq: bill.freq, day: bill.day || null, anchor: bill.anchor || null, since: bill.since || null, prev: bill.prev || null, until: addDays(today(), -1) };
           o.since = today();
         }
+        if (start) o.since = start;
+        else if (bill.since && bill.since > today()) o.since = today(); // the first-payment date was cleared
         Object.assign(bill, o);
       } else {
-        // A new bill counts from today (or from the bank charge it was made from).
-        o.since = tx ? addDays(tx.date, -10) : today();
+        // A new bill counts from today (or from the bank charge it was made from), or from its first payment.
+        o.since = start || (tx ? addDays(tx.date, -10) : today());
         S.bills.push(bill = Object.assign({ id: uid() }, o));
       }
       // A new bill made from a bank transaction: that transaction is its first payment.

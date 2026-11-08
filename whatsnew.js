@@ -4,6 +4,12 @@
    Every release adds an entry here, in plain words: added, changed, fixed, removed. */
 const CHANGELOG = [
   {
+    v: '2.8.1', date: '2026-11-08',
+    added: [
+      'Bills now have "First payment" and "Last payment" dates. Use them for a payment plan, like the Klarna payments for the new dryer: the app doesn\'t count it before the first payment, and stops counting it after the last one. Both are optional. Leave them empty for bills that are already being paid and keep going.'
+    ]
+  },
+  {
     v: '2.8.0', date: '2026-11-07',
     changed: [
       'Your bank now connects only through Plaid. SimpleFIN is no longer used. Nothing for you to do: the app moved everything over by itself, and your bills, names and matched charges stay as they were.',
