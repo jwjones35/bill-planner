@@ -81,7 +81,6 @@ const SYNC_COLL = {
 const SYNC_FIELDS = ['setupDate', 'balances', 'everydayPerWeek', 'savingsBuffer', 'suggestSavings', 'lastBackup', 'autopayWait', 'cards', 'limits', 'fuelSince', 'txWho', 'txEdit'];
 const SYNC_BANK_LWW = ['labels', 'txNames', 'manual', 'feeAlerts', 'priceAlerts', 'liveAcct'];
 const SYNC_BANK_UNION = ['ignore', 'noFeePairs', 'feeRules'];
-// (Each phone counts its own SimpleFIN checks in localStorage, so that count isn't shared.)
 const SYNC_BANK_FEED = ['accounts', 'tx', 'bal', 'fetchedAt', 'error', 'errorKind', 'errorSays', 'note', 'checkingId', 'savingsId'];
 const noUpd = (k, v) => (k === 'upd' ? undefined : v);
 let syncSnap = null;
@@ -335,8 +334,8 @@ async function notifyNow(note, toName) {
   await api('POST', `/v1/h/${cfg.id}/notify`, k.token, { data, to: toName ? await personTag(toName) : null });
 }
 /* ---------- around-the-clock bank check ----------
-   The sync storage keeps a copy of the read-only SimpleFIN key (it can only read balances, never move money) and
-   checks the connection every few hours, even with the app closed on every phone. If it breaks, every phone gets the
+   The sync storage holds the bank connection (Plaid's key, read-only: it can never move money) and checks it
+   every hour, even with the app closed on every phone. If it breaks, every phone gets the
    "sign in again" notification; when it works again, "working again". Both notes are encrypted here, so the
    storage can't read them. It keeps no balances or transactions. */
 const BW_SENT = 'billplanner.bankwatch'; // a hash of what was last sent, so it's only sent again when it changes
@@ -354,17 +353,13 @@ async function bankWatchUpdate() {
     }
     bankWatchInfo = { on: false }; return;
   }
-  if (!bankOn()) return; // just connected: wait for the first update from the bank
+  if (!bankOn() || !plaidMode()) return; // just connected (or still moving to Plaid): wait for the first update
   const tz = new Date().getTimezoneOffset(); // for the storage's quiet hours (no reminders 10 PM to 7 AM)
-  const live = liveOn();
-  const bank = bankName(), h = await sha256hex(acc + '|' + bank + '|' + tz + '|' + live + '|3');
+  const bank = bankName(), h = await sha256hex(acc + '|' + bank + '|' + tz + '|4');
   if (sent !== h) {
     const raw = await noteKey(cfg), Bank = bank.charAt(0).toUpperCase() + bank.slice(1);
     // must: stays on screen until tapped where the phone allows it. It repeats every hour until acknowledged.
-    // With the live balance (Plaid) the number is still right, so it's a calmer note, sent once.
-    const broken = await encryptNote(raw, live
-      ? { title: `SimpleFIN needs you to sign in to ${Bank} again`, body: 'Your balance is still live and correct. New purchases will be sorted again once you sign in. Tap for the steps.', tag: 'bankwatch', url: './?fix=1' }
-      : { title: `⚠ SimpleFIN needs you to sign in to ${Bank} again`, body: `"Available to spend" is NOT current until then. Tap for the steps (about a minute). This repeats every hour until you tap it.`, tag: 'bankwatch', url: './?fix=1', must: true });
+    const broken = await encryptNote(raw, { title: `⚠ Sign in to ${Bank} again`, body: `${Bank} wants a new sign-in, so "Available to spend" is NOT current until then. Tap to sign in (about a minute, right in the app). This repeats every hour until you tap it.`, tag: 'bankwatch', url: './?fix=1', must: true });
     const fixed = await encryptNote(raw, { title: `${Bank} is working again`, body: 'Your balance is updating by itself again.', tag: 'bankwatch' });
     const r = await api('PUT', `/v1/h/${cfg.id}/bankwatch`, k.token, { access: acc, broken, fixed, tz });
     if (r.status === 200) { try { localStorage.setItem(BW_SENT, h); } catch (e) { } }

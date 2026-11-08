@@ -97,13 +97,26 @@ async function sendDue(env) {
 }
 
 /* ---------- around-the-clock bank check ----------
-   Every 4 hours (every 2 while broken) the storage asks SimpleFIN for balances only, with the household's read-only
-   key. It keeps no balances or transactions, only whether the connection works. When it breaks, every phone gets
-   the "sign in again" notification; when it works again, the "working again" one. Both were encrypted by the phones.
-   SimpleFIN allows about 24 requests a day per key and turns the key off if an app keeps going over, so this
-   uses at most 4 a day (8 while broken) and each phone at most 8. Only a real sign-in problem counts as broken:
-   no answer, a busy SimpleFIN (429, 5xx) or a temporary account message changes nothing. */
-const BW_OK_EVERY = 6 * 3600000, BW_BROKEN_EVERY = 3 * 3600000;
+   Every hour the storage asks Plaid whether the household's bank connection still works (Plaid's /item/get,
+   which doesn't contact the bank or cost anything). It keeps no balances here, only whether the connection works.
+   When the bank wants a new sign-in, every phone gets the "sign in again" notification (hourly until each phone
+   taps it); when it works again, the "working again" one. Both were encrypted by the phones.
+   Before 2.8.0 this checked SimpleFIN with a read-only key kept here. Households still on SimpleFIN keep that
+   check until a phone with 2.8.0 moves them to Plaid, which replaces the key with the word 'plaid'. */
+const BW_OK_EVERY = 6 * 3600000, BW_BROKEN_EVERY = 3 * 3600000; // SimpleFIN (about 24 checks a day allowed)
+const BW_PLAID_EVERY = 3600000;
+// Plaid item errors that mean someone has to sign in again (or connect again).
+const BW_PLAID_BROKEN = /^(ITEM_LOGIN_REQUIRED|PENDING_DISCONNECT|ITEM_LOCKED|USER_SETUP_REQUIRED|ACCESS_NOT_GRANTED|NO_ACCOUNTS|INSUFFICIENT_CREDENTIALS|INVALID_CREDENTIALS|INVALID_MFA|ITEM_NOT_FOUND|INVALID_ACCESS_TOKEN)$/;
+async function bwPlaidCheck(env, household) {
+  if (!env.PLAID_CLIENT_ID || !env.PLAID_SECRET || !env.PLAID_HOST) return null;
+  const row = await env.DB.prepare('SELECT token FROM plaid WHERE household = ?').bind(household).first();
+  if (!row) return { state: 'broken', sure: true };
+  const r = await plaidCall(env, '/item/get', { access_token: row.token });
+  if (r.error) return BW_PLAID_BROKEN.test(r.error.code) ? { state: 'broken', sure: true } : null;
+  const e = r.data.item && r.data.item.error;
+  if (e && e.error_code) return BW_PLAID_BROKEN.test(e.error_code) ? { state: 'broken', sure: true } : null;
+  return { state: 'ok' };
+}
 // Older SimpleFIN answers have plain-text errors without a code: these words mean someone has to sign in again.
 const BW_SIGNIN = /auth|sign.?in|log.?in|credential|password|mfa|reconnect|re-?link|expired/i;
 const BW_QUOTA = /too many|quota|rate.?limit|request limit|limit (is |was |has been )?(reached|exceeded)|per day/i;
@@ -140,8 +153,10 @@ async function bwRun(env, onlyId) {
     ? [await env.DB.prepare('SELECT * FROM bankwatch WHERE household = ?').bind(onlyId).first()].filter(Boolean)
     : (await env.DB.prepare('SELECT * FROM bankwatch').all()).results || [];
   for (const w of rows) {
-    if (!env.BW_TEST_HOST && now - w.checked < (onlyId ? 10 * 60000 : (w.state === 'broken' ? BW_BROKEN_EVERY : BW_OK_EVERY) - 60000)) continue;
-    const c = await bwCheck(env, w.access);
+    const plaid = w.access === 'plaid';
+    const every = plaid ? BW_PLAID_EVERY : w.state === 'broken' ? BW_BROKEN_EVERY : BW_OK_EVERY;
+    if (!env.BW_TEST_HOST && now - w.checked < (onlyId ? (plaid ? 60000 : 10 * 60000) : every - 60000)) continue;
+    const c = plaid ? await bwPlaidCheck(env, w.household) : await bwCheck(env, w.access);
     if (!c) { await env.DB.prepare('UPDATE bankwatch SET checked = ? WHERE household = ?').bind(now, w.household).run(); continue; }
     let state = w.state, strikes = 0;
     if (c.state === 'ok') state = 'ok';
@@ -160,14 +175,14 @@ async function bwRun(env, onlyId) {
   }
 }
 // While broken: every hour, send "sign in again" again to each phone that hasn't acknowledged it.
-// Not between 10 PM and 7 AM at home (the first alert goes out at any hour). No repeats when the household also
-// has the live balance (Plaid): then "Available to spend" is still right, only new purchases wait.
+// Not between 10 PM and 7 AM at home (the first alert goes out at any hour). An old SimpleFIN check gets no repeats
+// once the household has Plaid: it is about to be replaced.
 const BW_NAG_EVERY = 3600000;
 async function bwNag(env) {
   const now = Date.now();
-  const rows = (await env.DB.prepare("SELECT household, broken, acked, nagged, tz FROM bankwatch WHERE state = 'broken'").all()).results || [];
+  const rows = (await env.DB.prepare("SELECT household, access, broken, acked, nagged, tz FROM bankwatch WHERE state = 'broken'").all()).results || [];
   for (const w of rows) {
-    if (await env.DB.prepare('SELECT 1 FROM plaid WHERE household = ?').bind(w.household).first()) continue;
+    if (w.access !== 'plaid' && await env.DB.prepare('SELECT 1 FROM plaid WHERE household = ?').bind(w.household).first()) continue;
     if (!env.BW_TEST_HOST && now - w.nagged < BW_NAG_EVERY - 60000) continue;
     const hour = new Date(now - (w.tz || 0) * 60000).getUTCHours();
     if (!env.BW_TEST_HOST && (hour < 7 || hour >= 22)) continue;
@@ -185,7 +200,7 @@ async function bwNag(env) {
 }
 
 /* ---------- live balance from the bank (Plaid) ----------
-   SimpleFIN only gets new numbers from the bank about once a day. Plaid's Balance asks the bank right now.
+   The household's bank connection. Plaid's Balance asks the bank right now; Transactions lists purchases.
    The household's Plaid access token stays here (never sent to the phones); the phones ask for the balance.
    Needs PLAID_CLIENT_ID (wrangler.toml), the Cloudflare secret PLAID_SECRET and PLAID_HOST (Plaid's address).
    The free Trial plan allows 10 bank connections in total, ever, so a connection is only made on purpose. */
@@ -244,7 +259,7 @@ async function plaidRoute(req, env, id, body) {
     return { s: 200, b: out };
   }
   if (req.method === 'POST' && step === 'tx') {
-    // The last 10 days of purchases, so the spending list shows today's ones before SimpleFIN has them.
+    // The last 35 days of purchases: the app's whole purchase list (bill matching, spending, gas questions).
     if (!row) return { s: 404, b: { error: { code: 'NOT_CONNECTED', msg: 'No live balance connection yet.' } } };
     const now = Date.now();
     const c = await env.DB.prepare('SELECT last, cache FROM plaidtx WHERE household = ?').bind(id).first();
@@ -259,15 +274,16 @@ async function plaidRoute(req, env, id, body) {
       if (!rf.error) refreshed = now;
     }
     const day =ms => new Date(ms - 6 * 3600000).toISOString().slice(0, 10); // US Central-ish calendar day
-    const opts = { count: 250 };
+    const opts = { count: 500, include_original_description: true };
     const acct = String(body.account || '');
     if (/^[A-Za-z0-9_-]{8,80}$/.test(acct)) opts.account_ids = [acct];
-    const r = await plaidCall(env, '/transactions/get', { access_token: row.token, start_date: day(now - 10 * 86400000), end_date: day(now + 86400000), options: opts });
+    const r = await plaidCall(env, '/transactions/get', { access_token: row.token, start_date: day(now - 35 * 86400000), end_date: day(now + 86400000), options: opts });
     const out = r.error ? { error: r.error, at: now, refreshed } : {
       at: now, refreshed,
       tx:(r.data.transactions || []).map(t => ({
         id: t.transaction_id, acct: t.account_id, date: t.authorized_date || t.date, amount: t.amount,
-        name: t.merchant_name || t.name || '', pending: !!t.pending
+        // desc: the bank's own wording (what bills and names are recognized by); name: Plaid's tidier name
+        desc: t.original_description || t.name || '', name: t.merchant_name || t.name || '', pending: !!t.pending
       }))
     };
     await env.DB.prepare('INSERT OR REPLACE INTO plaidtx (household, last, cache) VALUES (?, ?, ?)').bind(id, now, JSON.stringify(out)).run();
@@ -419,7 +435,7 @@ export default {
       if (m[2] === 'bankwatch') {
         if (req.method === 'PUT') {
           const a = String(body.access || '');
-          if (!/^https?:\/\/[^:@\/]+:[^@\/]+@[^\/]+\//.test(a) || a.length > 600 || !bwHostOk(env, a)) return json(req, 400, { error: 'bad access' });
+          if (a !== 'plaid' && (!/^https?:\/\/[^:@\/]+:[^@\/]+@[^\/]+\//.test(a) || a.length > 600 || !bwHostOk(env, a))) return json(req, 400, { error: 'bad access' });
           if (typeof body.broken !== 'string' || typeof body.fixed !== 'string' || body.broken.length > 1500 || body.fixed.length > 1500) return json(req, 400, { error: 'bad notes' });
           const tz = Number.isInteger(body.tz) && Math.abs(body.tz) <= 840 ? body.tz : 360;
           const old = await env.DB.prepare('SELECT access FROM bankwatch WHERE household = ?').bind(id).first();

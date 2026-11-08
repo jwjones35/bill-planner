@@ -4,6 +4,15 @@
    Every release adds an entry here, in plain words: added, changed, fixed, removed. */
 const CHANGELOG = [
   {
+    v: '2.8.0', date: '2026-11-07',
+    changed: [
+      'Your bank now connects only through Plaid. SimpleFIN is no longer used. Nothing for you to do: the app moved everything over by itself, and your bills, names and matched charges stay as they were.',
+      'When your bank wants you to sign in again, tap "Sign in again". The bank\'s sign-in opens right inside the app. No more SimpleFIN website, email links or second windows.',
+      'Purchases now come straight from the bank each time the app opens, instead of about once a day. A purchase shows in the list once the bank posts it, usually within a day. The balance already includes it before then.'
+    ],
+    removed: ['The separate "Just in" purchases, because every purchase now comes from the same place.']
+  },
+  {
     v: '2.7.0', date: '2026-11-05',
     fixed: [
       'The app kept saying the bank was disconnected when it wasn\'t. Any small hiccup (a moment without internet, SimpleFIN being busy) was treated as a broken connection. Now those are retried quietly by the app, and you only get asked to fix something when SimpleFIN really needs you: to sign in to the bank again, a new setup token, or a payment. Each one says plainly what happened and what to do.',
