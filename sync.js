@@ -583,9 +583,91 @@ document.addEventListener('submit', async e => {
   if (String(new FormData(f).get('word') || '').trim().toUpperCase() !== f.dataset.word) return;
   await syncAct(f.id === 'fSyncOff' ? 'syncOffYes' : 'syncOffAll');
 }, true);
+/* ---------- automatic backups ----------
+   While sharing is on, the sync storage keeps the last copy saved on each of the last days (see the storage's snaps
+   table), encrypted with the same household key. Going back to a day puts bills, paychecks, payments, set-asides and
+   spending back as they were, on every phone: save() stamps everything that changed as new, so it wins the merge.
+   The bank's own data and today's balances are not turned back. */
+const SNAP_UNDO_KEY = 'billplanner.undoRestore'; // { at, day, state }: how this phone looked just before going back
+const snapUndo = () => { try { const u = JSON.parse(localStorage.getItem(SNAP_UNDO_KEY)); return u && Date.now() - u.at < 7 * 86400000 ? u : null; } catch (e) { return null; } };
+const snapTime = at => new Date(at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+async function snapApi(q) {
+  const cfg = syncCfg();
+  if (!cfg) throw new Error('Automatic backups need sharing to be on.');
+  if (!navigator.onLine) throw new Error('The phone is offline. Try again when it is back online.');
+  const k = await syncKeys(cfg);
+  const r = await api('GET', `/v1/h/${cfg.id}/snaps${q || ''}`, k.token);
+  if (r.status !== 200) throw new Error(r.status === 404 ? 'There is no copy for that day.' : `The sync storage answered with error ${r.status}.`);
+  return { k, j: r.j };
+}
+// Put an earlier copy of the data in place of today's.
+function snapApply(old) {
+  const cur = S, st = JSON.parse(JSON.stringify(old));
+  st.bank = st.bank || {};
+  for (const f of [...SYNC_BANK_FEED, ...SYNC_BANK_UNION, 'suggest', 'autoLog']) { if (cur.bank[f] === undefined) delete st.bank[f]; else st.bank[f] = cur.bank[f]; }
+  st.balances = cur.balances; st.lastBackup = cur.lastBackup; st.sentAlerts = cur.sentAlerts;
+  // Keep every "removed" and "changed" stamp from both, so the merge on the other phones comes out the same.
+  st.tomb = Object.assign({}, st.tomb || {});
+  for (const [k, t] of Object.entries(cur.tomb || {})) st.tomb[k] = Math.max(t, st.tomb[k] || 0);
+  st.fupd = Object.assign({}, st.fupd || {});
+  for (const [k, t] of Object.entries(cur.fupd || {})) st.fupd[k] = Math.max(t, st.fupd[k] || 0);
+  S = normalize(st);
+  if (bankOn()) runMatching();
+  save();
+}
+async function snapGoBack(day) {
+  await syncNow(); // start from what every phone has now
+  if (syncStatus.error) throw new Error(syncStatus.error);
+  const { k, j } = await snapApi('?day=' + encodeURIComponent(day));
+  const old = await decryptJson(k.key, j.data);
+  if (!old || !old.state || !Array.isArray(old.state.bills)) throw new Error("That day's copy can't be read.");
+  try { localStorage.setItem(SNAP_UNDO_KEY, JSON.stringify({ at: Date.now(), day, state: S })); } catch (e) { }
+  snapApply(old.state);
+}
+async function sheetSnaps() {
+  openSheet(`<h3>Restore from an earlier day</h3><p class="hint">Looking for your automatic backups...</p>`);
+  let j;
+  try { j = (await snapApi()).j; }
+  catch (e) { openSheet(`<h3>Restore from an earlier day</h3><div class="form-error">${esc(e.message)}</div><div class="btns"><button class="btn" data-act="close">Close</button></div>`); return; }
+  const days = (j.days || []).filter(d => d.day < j.today);
+  openSheet(`<h3>Restore from an earlier day</h3>
+    <p class="hint" style="margin-top:0">The app keeps a copy of each of the last 7 days that something changed. Tap a day to put the app back the way it was at the end of that day. You're asked to confirm first.</p>
+    ${days.length ? `<div class="card" style="margin-top:10px">${days.map(d => `<button class="row" data-act="syncSnapPick" data-day="${esc(d.day)}" data-at="${Number(d.at) || 0}"><span class="main"><div class="name">${esc(nice(d.day))}</div><div class="sub">As it was at ${esc(snapTime(d.at))} that day</div></span></button>`).join('')}</div>`
+      : '<div class="empty">No earlier days yet. The first one will be here tomorrow.</div>'}
+    <div class="btns"><button class="btn ghost" data-act="close">Close</button></div>`);
+}
+function sheetSnapConfirm(day, at) {
+  openSheet(`<h3>Go back to ${esc(nice(day))}?</h3>
+    <p>Bills, paychecks, payments marked paid, set-asides and spending go back to how they were at <b>${esc(snapTime(at))} on ${esc(nice(day))}</b>, on <b>every phone</b>.</p>
+    <div class="banner warn">Anything added or changed after that is undone.</div>
+    <p class="hint">Your bank connection, the bank's own list of charges and today's balances stay as they are. If this turns out to be the wrong day, you can undo it for 7 days under More › Backup, on this phone.</p>
+    <div class="btns">${cancelBtn}<button class="btn danger" data-act="syncSnapYes" data-day="${esc(day)}">Go back to that day</button></div>`);
+}
+// The automatic-backup part of the Backup card on More (empty when sharing is off).
+function snapCardHtml() {
+  if (!syncLinked()) return '';
+  const u = snapUndo();
+  return `<p style="margin-top:0"><b>Automatic backups are on.</b> Because sharing is on, the app keeps a copy of your data for each of the last 7 days that something changed, and deletes older ones by itself. Nothing is saved to the Files app, and the copies are locked with the same key as sharing.</p>
+    <div class="btns"><button class="btn" data-act="syncSnaps">Restore from an earlier day</button></div>
+    ${u ? `<div class="btns"><button class="btn ghost" data-act="syncSnapUndo">Undo going back to ${esc(nice(u.day))}</button></div>` : ''}
+    <p class="hint" style="margin-top:18px">You can also save a backup file by hand:</p>`;
+}
+
 // Button and form handlers (the app's own handlers pass anything they don't know here).
-async function syncAct(act) {
+async function syncAct(act, el) {
   try {
+    if (act === 'syncSnaps') { await sheetSnaps(); return true; }
+    if (act === 'syncSnapPick') { sheetSnapConfirm(el.dataset.day, Number(el.dataset.at)); return true; }
+    if (act === 'syncSnapYes') {
+      const day = el.dataset.day; el.disabled = true; el.textContent = 'Going back...';
+      await snapGoBack(day); closeSheet(); render(); toast(`The app is back to how it was on ${nice(day)}.`); return true;
+    }
+    if (act === 'syncSnapUndo') {
+      const u = snapUndo(); if (!u) return true;
+      await syncNow(); snapApply(u.state);
+      try { localStorage.removeItem(SNAP_UNDO_KEY); } catch (e) { }
+      render(); toast('Undone. The app is back to how it was before you went back.'); return true;
+    }
     if (act === 'syncOn') { toast('Turning on sharing...'); await syncStart(); render(); sheetSyncCode(await syncMakeCode()); return true; }
     if (act === 'syncAdd') { sheetSyncCode(await syncMakeCode()); return true; }
     if (act === 'syncJoin') { sheetSyncJoin(); return true; }

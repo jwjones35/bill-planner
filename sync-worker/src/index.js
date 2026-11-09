@@ -34,6 +34,21 @@ function same(a, b) {
   return d === 0;
 }
 
+/* ---------- automatic backups ----------
+   Every save also keeps that day's copy (one row per household per day, home time; still encrypted).
+   Today plus the 7 days before it that had a save are kept; anything older is deleted right then.
+   A problem here never stops the save itself. */
+const SNAP_KEEP = 8;
+const homeDay = t => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(t));
+async function snapSave(env, id, data, now) {
+  try {
+    await env.DB.batch([
+      env.DB.prepare('INSERT OR REPLACE INTO snaps (household, day, data, at) VALUES (?, ?, ?, ?)').bind(id, homeDay(now), data, now),
+      env.DB.prepare('DELETE FROM snaps WHERE household = ? AND day NOT IN (SELECT day FROM snaps WHERE household = ? ORDER BY day DESC LIMIT ?)').bind(id, id, SNAP_KEEP)
+    ]);
+  } catch (e) { }
+}
+
 /* ---------- Web Push (RFC 8291 encryption + VAPID), with the browser's built-in crypto ---------- */
 const enc = new TextEncoder();
 const b64u = buf => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -373,7 +388,7 @@ export default {
       }
       return json(req, 405, { error: 'method not allowed' });
     }
-    const m = url.pathname.match(/^\/v1\/h\/([A-Za-z0-9_-]{16,64})(?:\/(sub|sched|test|notify|subs|fuelprice|inbox|bankwatch|plaid))?$/);
+    const m = url.pathname.match(/^\/v1\/h\/([A-Za-z0-9_-]{16,64})(?:\/(sub|sched|test|notify|subs|fuelprice|inbox|bankwatch|plaid|snaps))?$/);
     if (!m) return json(req, 404, { error: 'not found' });
     const id = m[1];
     const token = (req.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
@@ -385,6 +400,17 @@ export default {
     // Notifications: a phone's push address, the household's reminder schedule, and a test message.
     if (m[2]) {
       if (!row) return json(req, 404, { error: 'no data yet' });
+      // Automatic backups: the list of days kept, or one day's (encrypted) copy with ?day=YYYY-MM-DD.
+      if (m[2] === 'snaps') {
+        if (req.method !== 'GET') return json(req, 405, { error: 'method not allowed' });
+        const day = url.searchParams.get('day');
+        if (day) {
+          const s = /^\d{4}-\d{2}-\d{2}$/.test(day) ? await env.DB.prepare('SELECT day, at, data FROM snaps WHERE household = ? AND day = ?').bind(id, day).first() : null;
+          return s ? json(req, 200, s) : json(req, 404, { error: 'no copy for that day' });
+        }
+        const days = (await env.DB.prepare('SELECT day, at FROM snaps WHERE household = ? ORDER BY day DESC').bind(id).all()).results || [];
+        return json(req, 200, { today: homeDay(Date.now()), days });
+      }
       let body = {};
       if (req.method !== 'DELETE' || req.headers.get('Content-Type')) { try { body = await req.json(); } catch (e) { body = {}; } }
       if (m[2] === 'sub') {
@@ -488,6 +514,7 @@ export default {
       if (!row) {
         if (ver !== 0) return json(req, 409, { ver: 0, data: null });
         await env.DB.prepare('INSERT INTO households (id, auth, ver, data, updated) VALUES (?, ?, 1, ?, ?)').bind(id, auth, data, now).run();
+        await snapSave(env, id, data, now);
         return json(req, 200, { ver: 1 });
       }
       // Only save over the version the phone last saw; otherwise send back the newer one to merge with.
@@ -496,11 +523,13 @@ export default {
         const cur = await env.DB.prepare('SELECT ver, data FROM households WHERE id = ?').bind(id).first();
         return json(req, 409, { ver: cur.ver, data: cur.data });
       }
+      await snapSave(env, id, data, now);
       return json(req, 200, { ver: ver + 1 });
     }
     if (req.method === 'DELETE') {
       if (row) {
         await env.DB.prepare('DELETE FROM households WHERE id = ?').bind(id).run();
+        await env.DB.prepare('DELETE FROM snaps WHERE household = ?').bind(id).run().catch(() => { });
         await env.DB.prepare('DELETE FROM subs WHERE household = ?').bind(id).run();
         await env.DB.prepare('DELETE FROM sched WHERE household = ?').bind(id).run();
         await env.DB.prepare('DELETE FROM bankwatch WHERE household = ?').bind(id).run();

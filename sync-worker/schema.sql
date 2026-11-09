@@ -65,6 +65,16 @@ CREATE TABLE IF NOT EXISTS pairs (
   expires INTEGER NOT NULL
 );
 
+-- Automatic backups: the last copy saved on each day (home time), still encrypted so the storage can't read it.
+-- Only the newest 8 days are kept per household; older ones are deleted whenever a new copy is saved.
+CREATE TABLE IF NOT EXISTS snaps (
+  household TEXT NOT NULL,
+  day TEXT NOT NULL,
+  data TEXT NOT NULL,
+  at INTEGER NOT NULL,
+  PRIMARY KEY (household, day)
+);
+
 -- Live balance (Plaid). token: the household's Plaid access token (read-only balances; it can never move money).
 -- It never leaves the storage. cache: the last answer, reused for 30 seconds; last: when it was asked.
 CREATE TABLE IF NOT EXISTS plaid (

@@ -4,6 +4,16 @@
    Every release adds an entry here, in plain words: added, changed, fixed, removed. */
 const CHANGELOG = [
   {
+    v: '2.9.0', date: '2026-11-09',
+    added: [
+      'Automatic backups. While sharing is on, the app keeps a copy of your data for each of the last 7 days that something changed, and deletes older ones by itself. Nothing is saved to the Files app and there is nothing to remember. The copies are locked with the same key as sharing.',
+      'More › Backup › "Restore from an earlier day" puts bills, paychecks, payments, set-asides and spending back the way they were at the end of a day you pick, on every phone. It asks before doing it, and you can undo it for 7 days. The first earlier day shows up tomorrow.'
+    ],
+    changed: [
+      'The buttons for backup files are now called "Save backup file" and "Restore from a file". You no longer need them for everyday safety.'
+    ]
+  },
+  {
     v: '2.8.4', date: '2026-11-09',
     fixed: [
       'Saving a backup, or adding bills to the Calendar, no longer leaves an extra text file next to the real file.'

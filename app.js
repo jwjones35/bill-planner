@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's available to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '2.8.4';
+const APP_VERSION = '2.9.0';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -1514,9 +1514,10 @@ function viewMore() {
     <p class="hint">Only each bill's name, amount and due date go into the calendar. If you change bills later, delete the old "Bill due" events before adding them again.</p></div>
 
   <h2>Backup</h2><div class="card pad">
-    <p>Your data lives only on this phone. Save a backup file to iCloud Drive or Files now and then. Each file has its date in the name. The iPhone keeps the old ones, so delete those in the Files app when you save a new one.</p>
-    <div class="btns"><button class="btn" data-act="backup">Save backup</button>
-    <label class="btn ghost file-btn" style="margin:0">Restore<input type="file" accept=".json,application/json" data-act="restore"></label></div></div>
+    ${snapCardHtml() || '<p>Your data lives only on this phone. Save a backup file to iCloud Drive or Files now and then.</p>'}
+    <p class="hint">Each backup file has its date in the name. The iPhone keeps the old ones, so delete those in the Files app when you save a new one.</p>
+    <div class="btns"><button class="btn${syncLinked() ? ' ghost' : ''}" data-act="backup">Save backup file</button>
+    <label class="btn ghost file-btn" style="margin:0">Restore from a file<input type="file" accept=".json,application/json" data-act="restore"></label></div></div>
 
   <h2>Other</h2><div class="card pad">
     <p class="small muted">Bill Planner ${APP_VERSION}. No accounts, no tracking, nothing sent anywhere.</p>
@@ -2203,7 +2204,7 @@ document.addEventListener('click', e => {
       }
       break;
     default:
-      if (act && act.startsWith('sync')) syncAct(act);
+      if (act && act.startsWith('sync')) syncAct(act, el);
       else if (act) spendAct(act, el);
   }
 });
