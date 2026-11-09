@@ -4,6 +4,15 @@
    Every release adds an entry here, in plain words: added, changed, fixed, removed. */
 const CHANGELOG = [
   {
+    v: '2.8.3', date: '2026-11-09',
+    fixed: [
+      'Saving a backup, or adding bills to the Calendar, no longer leaves an extra text file next to the real file.'
+    ],
+    changed: [
+      'The backup file has its date in the name again. The single file name from 2.8.2 did not work: an iPhone never replaces a saved file, it adds "2", "3" and so on. With the date you can tell which backup is newest and delete the older ones in the Files app.'
+    ]
+  },
+  {
     v: '2.8.2', date: '2026-11-09',
     changed: [
       'The backup file now always has the same name, bill-planner-backup.json, with no date in it. Save it to the same folder each time and let it replace the old one, so old backups stop piling up. Backups you saved before this update still have a date in their name: you can delete those in the Files app.'

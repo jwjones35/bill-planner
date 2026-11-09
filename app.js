@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's available to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '2.8.2';
+const APP_VERSION = '2.8.3';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -1514,7 +1514,7 @@ function viewMore() {
     <p class="hint">Only each bill's name, amount and due date go into the calendar. If you change bills later, delete the old "Bill due" events before adding them again.</p></div>
 
   <h2>Backup</h2><div class="card pad">
-    <p>Your data lives only on this phone. Save a backup file to iCloud Drive or Files now and then. The file is always named bill-planner-backup.json: save it to the same folder each time and let it replace the old one, so you only ever keep one.</p>
+    <p>Your data lives only on this phone. Save a backup file to iCloud Drive or Files now and then. Each file has its date in the name. The iPhone keeps the old ones, so delete those in the Files app when you save a new one.</p>
     <div class="btns"><button class="btn" data-act="backup">Save backup</button>
     <label class="btn ghost file-btn" style="margin:0">Restore<input type="file" accept=".json,application/json" data-act="restore"></label></div></div>
 
@@ -1917,7 +1917,8 @@ async function shareOrDownload(name, text, type) {
   const blob = new Blob([text], { type });
   try {
     const file = new File([blob], name, { type });
-    if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], title: name }); return; }
+    // Share the file alone, with no title: on an iPhone, "Save to Files" saves a title as an extra text file next to it.
+    if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file] }); return; }
   } catch (e) { if (e && e.name === 'AbortError') return; }
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a'); a.href = url; a.download = name;
