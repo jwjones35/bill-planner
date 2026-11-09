@@ -4,6 +4,12 @@
    Every release adds an entry here, in plain words: added, changed, fixed, removed. */
 const CHANGELOG = [
   {
+    v: '2.8.2', date: '2026-11-09',
+    changed: [
+      'The backup file now always has the same name, bill-planner-backup.json, with no date in it. Save it to the same folder each time and let it replace the old one, so old backups stop piling up. Backups you saved before this update still have a date in their name: you can delete those in the Files app.'
+    ]
+  },
+  {
     v: '2.8.1', date: '2026-11-08',
     added: [
       'Bills now have "First payment" and "Last payment" dates. Use them for a payment plan, like the Klarna payments for the new dryer: the app doesn\'t count it before the first payment, and stops counting it after the last one. Both are optional. Leave them empty for bills that are already being paid and keep going.'
