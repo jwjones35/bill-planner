@@ -4,7 +4,7 @@
    Every release adds an entry here, in plain words: added, changed, fixed, removed. */
 const CHANGELOG = [
   {
-    v: '2.8.3', date: '2026-11-09',
+    v: '2.8.4', date: '2026-11-09',
     fixed: [
       'Saving a backup, or adding bills to the Calendar, no longer leaves an extra text file next to the real file.'
     ],

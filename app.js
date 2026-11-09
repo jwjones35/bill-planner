@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's available to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '2.8.3';
+const APP_VERSION = '2.8.4';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -1929,8 +1929,8 @@ function backup() {
   S.lastBackup = today(); save();
   // madeBy: whose phone made it, so "Me" in the file can be turned into that name on another phone.
   const p = profile();
-  // One fixed name (no date), so saving to the same folder replaces the old backup instead of piling up files.
-  shareOrDownload('bill-planner-backup.json',JSON.stringify(Object.assign({}, S, { madeBy: p ? p.name : null }), null, 1), 'application/json');
+  // The date is in the name because an iPhone never replaces a saved file (it adds "2", "3"...), so the name must say which is newest.
+  shareOrDownload(`bill-planner-backup-${today()}.json`, JSON.stringify(Object.assign({}, S, { madeBy: p ? p.name : null }), null, 1), 'application/json');
 }
 function restoreFile(file) {
   const r = new FileReader();
