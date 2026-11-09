@@ -2,7 +2,7 @@
 /* Bill Planner: bills, paydays and what's available to spend.
    Everything is stored on this device only (localStorage). No server, no tracking. */
 
-const APP_VERSION = '2.8.1';
+const APP_VERSION = '2.8.2';
 const KEY = 'billplanner.v1';
 const DAY = 86400000;
 
@@ -1514,7 +1514,7 @@ function viewMore() {
     <p class="hint">Only each bill's name, amount and due date go into the calendar. If you change bills later, delete the old "Bill due" events before adding them again.</p></div>
 
   <h2>Backup</h2><div class="card pad">
-    <p>Your data lives only on this phone. Save a backup file to iCloud Drive or Files now and then.</p>
+    <p>Your data lives only on this phone. Save a backup file to iCloud Drive or Files now and then. The file is always named bill-planner-backup.json: save it to the same folder each time and let it replace the old one, so you only ever keep one.</p>
     <div class="btns"><button class="btn" data-act="backup">Save backup</button>
     <label class="btn ghost file-btn" style="margin:0">Restore<input type="file" accept=".json,application/json" data-act="restore"></label></div></div>
 
@@ -1928,7 +1928,8 @@ function backup() {
   S.lastBackup = today(); save();
   // madeBy: whose phone made it, so "Me" in the file can be turned into that name on another phone.
   const p = profile();
-  shareOrDownload(`bill-planner-backup-${today()}.json`, JSON.stringify(Object.assign({}, S, { madeBy: p ? p.name : null }), null, 1), 'application/json');
+  // One fixed name (no date), so saving to the same folder replaces the old backup instead of piling up files.
+  shareOrDownload('bill-planner-backup.json',JSON.stringify(Object.assign({}, S, { madeBy: p ? p.name : null }), null, 1), 'application/json');
 }
 function restoreFile(file) {
   const r = new FileReader();
